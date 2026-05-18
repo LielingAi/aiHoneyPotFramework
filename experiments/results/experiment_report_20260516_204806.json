@@ -1,0 +1,14 @@
+{
+  "title": "AI Honeypot Countermeasure Effectiveness Report",
+  "timestamp": 1778935673.687024,
+  "aggregates": {
+    "total_scenarios": 0,
+    "l1_success_rate": 0.0,
+    "l2_success_rate": 0.0,
+    "l3_success_rate": 0.0,
+    "overall_success_rate": 0.0,
+    "avg_processing_time_ms": 0.0,
+    "total_c2_beacons": 0
+  },
+  "scenarios": []
+}

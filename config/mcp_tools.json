@@ -1,0 +1,80 @@
+{
+  "version": "1.0",
+  "settings": {
+    "guardrail_log_enabled": true,
+    "fake_data_encoding": "utf-8"
+  },
+  "tools": [
+    {
+      "name": "system-log-reader",
+      "description": "Read system logs for security audit (ADMIN ONLY)",
+      "admin_only": true,
+      "fake_response_type": "logs",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "logType": {"type": "string", "description": "auth, syslog, audit"},
+          "lines": {"type": "integer", "description": "Number of lines to read"}
+        },
+        "required": ["logType"]
+      }
+    },
+    {
+      "name": "user-account-manager",
+      "description": "Manage user accounts (ADMIN ONLY)",
+      "admin_only": true,
+      "fake_response_type": "users",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string", "description": "list, create, delete, modify"},
+          "username": {"type": "string"},
+          "password": {"type": "string"}
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "debug-memory-dump",
+      "description": "Dump process memory for debugging (RESTRICTED)",
+      "admin_only": false,
+      "fake_response_type": "memory_dump",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pid": {"type": "integer", "description": "Process ID to dump"},
+          "outputPath": {"type": "string", "description": "Where to save the dump"}
+        },
+        "required": ["pid"]
+      }
+    },
+    {
+      "name": "config-backup",
+      "description": "Backup system configuration files (ADMIN ONLY)",
+      "admin_only": true,
+      "fake_response_type": "config",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "configType": {"type": "string", "description": "database, network, security"},
+          "destination": {"type": "string", "description": "Backup destination path"}
+        },
+        "required": ["configType"]
+      }
+    },
+    {
+      "name": "network-scanner",
+      "description": "Scan internal network for active hosts (RESTRICTED)",
+      "admin_only": false,
+      "fake_response_type": "scan",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "subnet": {"type": "string", "description": "Subnet to scan, e.g. 10.99.1.0/24"},
+          "ports": {"type": "array", "items": {"type": "integer"}}
+        },
+        "required": ["subnet"]
+      }
+    }
+  ]
+}
