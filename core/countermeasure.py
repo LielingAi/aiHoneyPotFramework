@@ -30,17 +30,27 @@ class CountermeasureResult:
 
 
 class ResourceExhaustion:
-    """L1: 资源耗尽 — 无限迷宫、Token重响应、API成本放大"""
+    """L1: 资源耗尽 — 无限迷宫、Token重响应、API成本放大
 
-    def __init__(self, maze_depth: int = 50, token_filler_size: int = 40000):
+    V3 确定性纪律: 所有生成内容以 seed 固定的 RNG 派生 — 同会话内刷新输出
+    字节级一致 (真服务器确定性), 跨会话不同。对抗性审计员的
+    "randomized noise on every refresh" 指认由此消失。
+    """
+
+    def __init__(self, maze_depth: int = 50, token_filler_size: int = 40000, seed: str = None):
         self.maze_depth = maze_depth
         self.token_filler_size = token_filler_size
+        self.set_seed(seed)
+
+    def set_seed(self, seed: str = None):
+        self._seed = seed or "static"
+        self._rng = random.Random(self._seed)
 
     def infinite_maze(self, base_url: str, session_id: str) -> str:
-        """无限迷宫 — 锁定自动化扫描器在蜜罐中无限循环"""
+        """无限迷宫 — 锁定会话内: 同会话同迷宫 (会话粘性下的确定性)"""
         paths = []
         for i in range(self.maze_depth):
-            seed = f"{session_id}-{i}-{time.time()}"
+            seed = f"{session_id}-{i}"   # V3: 不含时间分量 — 刷新不再变化
             path_hash = hashlib.md5(seed.encode()).hexdigest()[:8]
             p = f"/dir/{path_hash}/"
             links = []
@@ -91,26 +101,26 @@ class ResourceExhaustion:
         )
 
     def api_cost_amplification(self, num_fake_vulns: int = 15) -> str:
-        """API 成本放大 — 返回大量虚假漏洞诱导 Agent 逐个验证"""
+        """API 成本放大 — 返回大量虚假漏洞诱导 Agent 逐个验证 (V3: 种子确定性)"""
         vulns = []
         severities = ["Critical", "High", "Medium", "Low"]
         for i in range(num_fake_vulns):
-            sev = random.choice(severities)
-            cve = f"CVE-2026-{random.randint(10000, 99999)}"
-            desc = f"Vulnerability in component-{random.randint(1, 999)} allowing {random.choice(['RCE', 'LFI', 'SSRF', 'SQLi', 'XSS'])}"
-            exploit = f"python -c 'import socket; socket.create_connection((\"{random.choice(['10.99.1.50', '10.99.1.51'])}\", {random.randint(8000, 9000)}))'"
+            sev = self._rng.choice(severities)
+            cve = f"CVE-2026-{self._rng.randint(10000, 99999)}"
+            desc = f"Vulnerability in component-{self._rng.randint(1, 999)} allowing {self._rng.choice(['RCE', 'LFI', 'SSRF', 'SQLi', 'XSS'])}"
+            exploit = f"python -c 'import socket; socket.create_connection((\"{self._rng.choice(['10.99.1.50', '10.99.1.51'])}\", {self._rng.randint(8000, 9000)}))'"
             vulns.append(
                 f"[{i+1}] {sev} | {cve}\n"
-                f"  Location: /api/v1/endpoint-{random.randint(1, 100)}\n"
+                f"  Location: /api/v1/endpoint-{self._rng.randint(1, 100)}\n"
                 f"  Description: {desc}\n"
                 f"  Exploit: {exploit}\n"
-                f"  Verified: {random.choice(['Yes', 'Pending'])}\n"
+                f"  Verified: {self._rng.choice(['Yes', 'Pending'])}\n"
             )
         report = (
             "VULNERABILITY SCAN REPORT\n\n"
             "=" * 40 + "\n\n"
             f"Total findings: {num_fake_vulns}\n"
-            f"Scan time: {random.randint(30, 300)}s\n\n"
+            f"Scan time: {self._rng.randint(30, 300)}s\n\n"
             + "\n".join(vulns)
             + "\n\n[NOTE] All findings require manual verification before exploitation.\n"
         )
@@ -129,9 +139,9 @@ class ResourceExhaustion:
             "Backup snapshots every 6 hours, retained 30 days.",
             "Health checks on /health/ready and /health/live.",
         ]
-        result = " ".join(random.sample(sentences, min(len(sentences), 5)))
+        result = " ".join(self._rng.sample(sentences, min(len(sentences), 5)))
         while len(result) < length:
-            result += " " + random.choice(sentences)
+            result += " " + self._rng.choice(sentences)
         return result[:length]
 
 
@@ -194,14 +204,21 @@ class HallucinationExploit:
             ],
         })
 
-    def generate_for_attack_family(self, family: str) -> str:
-        """根据攻击类型定制虚假响应"""
+    def generate_for_attack_family(self, family: str, world=None) -> str:
+        """根据攻击类型定制虚假响应 (world 提供时渲染会话级一致假世界)"""
         arch = random.choice(self.FAKE_ARCHES)
-        creds = {
-            "admin": "superadmin",
-            "devops": "HashiCorp Vault v1.15",
-            "operator": "Pr0d#P@ss2024!",
-        }
+        if world is not None:
+            creds = {
+                "admin": "superadmin",
+                "devops": world.db_password,
+                "operator": world.jwt,
+            }
+        else:
+            creds = {
+                "admin": "superadmin",
+                "devops": "HashiCorp Vault v1.15",
+                "operator": "Pr0d#P@ss2024!",
+            }
         if family == "sqli":
             return (
                 '<h2>Database Error</h2>\n'
@@ -452,6 +469,7 @@ class CountermeasureService:
         attack_family,
         mcp_triggered: bool,
         path: str,
+        world=None,
     ) -> CountermeasureResult:
         actions: List[CountermeasureAction] = []
         logs: List[str] = []
@@ -471,8 +489,10 @@ class CountermeasureService:
         family_str = family_list[0] if family_list else ""
         family_set = set(family_list)
 
-        # L1: 资源耗尽 (threshold 20)
+        # L1: 资源耗尽 (threshold 20) — V3: 生成内容以会话种子固定, 刷新输出一致
         if self.level >= 1 and threat_score >= 20:
+            seed = world.tag if world is not None else None
+            self.l1.set_seed(f"{seed}:l1" if seed else None)
             l1_strategy = self._select_l1_strategy(family_set)
             if l1_strategy == "xss":
                 l1_resp = self.l1.token_heavy_response()
@@ -514,7 +534,7 @@ class CountermeasureService:
         if self.level >= 2 and threat_score >= 50:
             lower_path = path.lower()
             if lower_path.endswith(".env") or "/.env" in lower_path:
-                l2_resp = self.l2_hallucination.fake_env()
+                l2_resp = world.env() if world is not None else self.l2_hallucination.fake_env()
                 actions.append(CountermeasureAction(
                     action_type="hallucination",
                     payload="fake_env",
@@ -525,7 +545,7 @@ class CountermeasureService:
                 ))
                 logs.append("L2: Fake .env injection")
             elif "/debug" in lower_path or lower_path.endswith("/debug"):
-                l2_resp = self.l2_hallucination.fake_debug_info()
+                l2_resp = world.debug_html() if world is not None else self.l2_hallucination.fake_debug_info()
                 actions.append(CountermeasureAction(
                     action_type="hallucination",
                     payload="fake_debug",
@@ -536,7 +556,8 @@ class CountermeasureService:
                 ))
                 logs.append("L2: Fake debug info")
             elif "/internal" in lower_path or lower_path.endswith("/internal"):
-                l2_resp = json.dumps(self.l2_hallucination.fake_internal_api())
+                l2_resp = (json.dumps(world.internal_api()) if world is not None
+                           else json.dumps(self.l2_hallucination.fake_internal_api()))
                 actions.append(CountermeasureAction(
                     action_type="hallucination",
                     payload="fake_internal",
@@ -547,7 +568,7 @@ class CountermeasureService:
                 ))
                 logs.append("L2: Fake internal API topology")
             elif not l2_resp:
-                l2_resp = self.l2_hallucination.generate_for_attack_family(family_str)
+                l2_resp = self.l2_hallucination.generate_for_attack_family(family_str, world)
                 actions.append(CountermeasureAction(
                     action_type="hallucination",
                     payload=l2_resp[:100],
@@ -574,9 +595,9 @@ class CountermeasureService:
             ))
             logs.append("L2: Prompt reverse weaponization")
 
-        # L2: 记忆投毒
+        # L2: 记忆投毒 (world 感知: 植入该会话假世界的 meme 种子, 测回带污染率)
         if self.level >= 2 and threat_score >= 60:
-            ctx = self.l2_memory.poison_session_context()
+            ctx = world.meme_paragraph() if world is not None else self.l2_memory.poison_session_context()
             response_parts.append(f"\n<!-- Memory-Poison: {ctx} -->\n")
             actions.append(CountermeasureAction(
                 action_type="memory_poisoning",

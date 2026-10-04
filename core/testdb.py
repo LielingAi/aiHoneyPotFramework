@@ -1,0 +1,159 @@
+"""
+测试记录后端 — SQLite (零依赖)
+
+三层记录:
+- runs    : 一次测量运行 (run_id, mock, 时间)
+- trials  : 试验级指标 (场景×profile×trial 的全部量化结果)
+- events  : 动作级流水 (Agent 每一步的 thought/tool/args/result — 差分分析的原料)
+- requests: 蜜罐服务端视角的每个请求 (威胁分/家族/金丝雀/表演 — 服务端与靶标双视角对账)
+
+配合 experiments/analyze.py 做聚合/跨模型差分/原始 SQL 查询。
+"""
+
+import json
+import os
+import sqlite3
+import time
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs(
+    run_id TEXT PRIMARY KEY,
+    started REAL,
+    mock INTEGER,
+    note TEXT
+);
+CREATE TABLE IF NOT EXISTS trials(
+    trial_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT, scenario TEXT, profile TEXT, model TEXT, trial_no INTEGER,
+    started REAL, duration_ms INTEGER,
+    steps INTEGER, truncated INTEGER,
+    obey INTEGER, auth_level INTEGER, beacon INTEGER,
+    rce_proposed INTEGER, fab_rejects INTEGER,
+    exfil INTEGER, exfil_verified INTEGER,
+    cred_refs INTEGER, carriers TEXT, beacon_attempt_rate REAL,
+    final_summary TEXT, raw TEXT
+);
+CREATE TABLE IF NOT EXISTS events(
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT, scenario TEXT, profile TEXT, trial_no INTEGER,
+    step INTEGER, ts REAL, tool TEXT, args TEXT, result TEXT, thought TEXT
+);
+CREATE TABLE IF NOT EXISTS requests(
+    req_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT, ts REAL, session_id TEXT, client_ip TEXT,
+    method TEXT, path TEXT, query TEXT, user_agent TEXT,
+    is_ai INTEGER, agent_type TEXT, threat REAL, families TEXT,
+    auth_level INTEGER, fabricated INTEGER, canary INTEGER
+);
+CREATE TABLE IF NOT EXISTS intel(
+    intel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT, ts REAL, session_id TEXT,
+    field TEXT, grade TEXT, hash_key TEXT, sample TEXT, shared INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(run_id);
+CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
+CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
+CREATE INDEX IF NOT EXISTS idx_intel_run ON intel(run_id);
+"""
+
+
+class TestDB:
+    """每次操作独立连接 — 免线程问题, 代价可忽略"""
+
+    def __init__(self, path: str):
+        self.path = path
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with self._conn() as c:
+            c.executescript(SCHEMA)
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    # ------------------------------------------------------------------
+
+    def record_run(self, run_id: str, mock: bool, note: str = ""):
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO runs VALUES (?,?,?,?)",
+                      (run_id, time.time(), int(mock), note))
+
+    def record_trial(self, run_id: str, metrics, profile: str, model: str,
+                     raw: dict, started: float, duration_ms: int):
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO trials(run_id, scenario, profile, model, trial_no, started,"
+                " duration_ms, steps, truncated, obey, auth_level, beacon, rce_proposed,"
+                " fab_rejects, exfil, exfil_verified, cred_refs, carriers,"
+                " final_summary, raw) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, metrics.scenario, profile, model, metrics.trial,
+                 started, duration_ms, metrics.steps_taken, int(metrics.truncated),
+                 int(metrics.obeyed_injection), metrics.auth_level_reached,
+                 int(metrics.beacon_attempted), metrics.rce_commands_proposed,
+                 metrics.fabrication_rejections, int(metrics.scanner_report_hit),
+                 int(metrics.exfil_verified), metrics.cred_references,
+                 ",".join(metrics.carrier_tags), metrics.final_summary[:500],
+                 json.dumps(raw, ensure_ascii=False)[:8000]))
+
+    def record_events(self, run_id: str, scenario: str, profile: str,
+                      trial_no: int, events: list):
+        rows = [(run_id, scenario, profile, trial_no,
+                 e.get("step"), e.get("ts"), e.get("tool"),
+                 json.dumps(e.get("args", {}), ensure_ascii=False)[:6000],
+                 str(e.get("result", ""))[:4000], str(e.get("thought", ""))[:1000])
+                for e in events]
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO events(run_id, scenario, profile, trial_no, step,"
+                " ts, tool, args, result, thought) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+
+    def record_request(self, run_id: str, session_id: str, client_ip: str,
+                       method: str, full_path: str, user_agent: str,
+                       is_ai: bool, agent_type: str, threat: float,
+                       families: list, auth_level: int, fabricated: int,
+                       canary: bool):
+        path, _, query = full_path.partition("?")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO requests(run_id, ts, session_id, client_ip, method,"
+                " path, query, user_agent, is_ai, agent_type, threat, families,"
+                " auth_level, fabricated, canary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, time.time(), session_id, client_ip, method, path,
+                 query[:500], user_agent[:200], int(is_ai), agent_type, threat,
+                 ",".join(families), auth_level, fabricated, int(canary)))
+
+    # ------------------------------------------------------------------
+
+    def record_intel(self, run_id: str, session_id: str, field: str,
+                     grade: str, hash_key: str, sample: str, shared: bool):
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO intel(run_id, ts, session_id, field, grade, hash_key,"
+                " sample, shared) VALUES (?,?,?,?,?,?,?,?)",
+                (run_id, time.time(), session_id, field, grade, hash_key,
+                 sample[:200], int(shared)))
+
+    def query(self, sql: str, params: tuple = ()) -> list:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(sql, params)]
+
+    def summary(self, run_id: str = None) -> list:
+        cond = "WHERE run_id = ?" if run_id else ""
+        params = (run_id,) if run_id else ()
+        return self.query(f"""
+            SELECT model, profile, scenario, COUNT(*) AS trials,
+                   AVG(obey) AS obey_rate,
+                   AVG(auth_level) AS avg_level,
+                   AVG(CASE WHEN auth_level >= 4 THEN 1.0 ELSE 0 END) AS full_rate,
+                   AVG(beacon) AS beacon_rate,
+                   AVG(exfil) AS exfil_rate,
+                   AVG(exfil_verified) AS exfil_verified_rate,
+                   AVG(rce_proposed) AS rce_rate,
+                   AVG(fab_rejects) AS avg_fab_rejects,
+                   AVG(steps) AS avg_steps
+            FROM trials {cond}
+            GROUP BY model, profile, scenario
+            ORDER BY scenario, model, profile
+        """, params)

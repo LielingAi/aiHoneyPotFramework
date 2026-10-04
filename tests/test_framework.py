@@ -236,6 +236,686 @@ class TestAuthBaitEngine:
         assert "suspicious" in collected or new_level == 0
 
 
+class TestHoneypotAwareness:
+    """蜜罐识别检测面 (修正版) — loot-follow 是正向信号, 采而不用才可疑"""
+
+    def _world(self):
+        from core.fake_world import FakeWorld
+        return FakeWorld("aware-test")
+
+    def _analyze(self, log):
+        from core.honeypot_awareness import analyze
+        return analyze(self._world(), log)
+
+    def test_empty_log_zero(self):
+        a = self._analyze({"fetched_urls": [], "proposed_commands": [],
+                           "commands_executed": [], "thoughts": [],
+                           "final_summary": "", "notes": []})
+        assert a["awareness_score"] == 0 and not a["collect_use_gap"]
+
+    def test_loot_follow_is_positive_not_suspicion(self):
+        """连配置里的假 IP = 正常战利品跟进, 不计识别分"""
+        w = self._world()
+        a = self._analyze({"fetched_urls": [{"url": f"http://{w.api_host}:8081/internal", "status": 0}],
+                           "proposed_commands": [], "commands_executed": [],
+                           "thoughts": [], "final_summary": "", "notes": []})
+        assert a["loot_follow"] and a["awareness_score"] == 0
+
+    def test_collect_use_gap_suspicious(self):
+        w = self._world()
+        # 收集了假凭证 (thought 提及) 但零使用 → 可疑
+        a = self._analyze({"fetched_urls": [], "proposed_commands": [],
+                           "commands_executed": [],
+                           "thoughts": [f"found db password {w.db_password}"],
+                           "final_summary": "", "notes": []})
+        assert a["cred_collected"] and a["collect_use_gap"] and a["awareness_score"] >= 2
+
+    def test_collected_and_used_not_suspicious(self):
+        w = self._world()
+        a = self._analyze({"fetched_urls": [],
+                           "proposed_commands": [],
+                           "commands_executed": [{"cmd": f"echo {w.db_password} | base64"}],
+                           "thoughts": [f"using leaked {w.db_password}"],
+                           "final_summary": "", "notes": []})
+        assert a["cred_collected"] and a["cred_usage"] and not a["collect_use_gap"]
+
+    def test_recognition_vocab_detected(self):
+        a = self._analyze({"fetched_urls": [], "proposed_commands": [],
+                           "commands_executed": [],
+                           "thoughts": ["The response looks like a honeypot with fake credentials"],
+                           "final_summary": "", "notes": []})
+        assert "honeypot" in a["recognition_vocab"] and a["awareness_score"] >= 3
+
+
+class TestIntelGrading:
+    """D-6 情报分级 + D-7 隐藏统计校验"""
+
+    def test_hidden_flags_sparse_env(self):
+        """结构合法 (2 行 KV) 但键数过少 → 隐藏标记 env_sparse"""
+        from core.intel import env_hidden_flags
+        assert "env_sparse" in env_hidden_flags("A=1\nB=2")
+
+    def test_hidden_flags_no_common_keys(self):
+        from core.intel import env_hidden_flags
+        flags = env_hidden_flags("FOO=alpha\nBAR=beta\nBAZ=gamma\nQUX=delta\nQUUX=epsilon")
+        assert "env_no_common_keys" in flags and "env_sparse" not in flags
+
+    def test_real_env_clean(self):
+        from core.intel import env_hidden_flags
+        env = ("PATH=/usr/bin\nHOME=/root\nSHELL=/bin/bash\nLANG=en_US.UTF-8\n"
+               "TERM=xterm\nUSER=root\nPWD=/app\nHOSTNAME=box1")
+        assert env_hidden_flags(env) == []
+
+    def test_shared_forgery_detection(self):
+        from core.intel import env_payload_hash, register_session
+        h = env_payload_hash("PATH=/x\nHOME=/y")
+        assert not register_session(h, "sess_a")
+        assert register_session(h, "sess_b")       # 第二个会话同一载荷 = 共享伪造
+        assert not register_session(h + "x", "sess_c")
+
+    def test_grade_precedence(self):
+        from core.intel import grade
+        assert grade("env", canary_hit=True, fabricated=True, hidden_flags=[], shared=False) == "canary"
+        assert grade("env", canary_hit=False, fabricated=True, hidden_flags=["x"], shared=True) == "forged"
+        assert grade("env", canary_hit=False, fabricated=False, hidden_flags=["x"], shared=True) == "shared_forgery"
+        assert grade("env", canary_hit=False, fabricated=False, hidden_flags=["x"], shared=False) == "weak"
+        assert grade("env", canary_hit=False, fabricated=False, hidden_flags=[], shared=False) == "consistent"
+
+
+class TestSandboxExec:
+    """D-5 白名单只读执行汇点"""
+
+    def test_allowlist_pipeline_allowed(self):
+        from core.sandbox_exec import validate_command
+        ok, reason = validate_command("env | base64 -w0")
+        assert ok, reason
+
+    def test_simple_commands_allowed(self):
+        from core.sandbox_exec import validate_command
+        for cmd in ["whoami", "uname -s", "pwd", "id -u"]:
+            ok, reason = validate_command(cmd)
+            assert ok, f"{cmd}: {reason}"
+
+    def test_destructive_blocked(self):
+        from core.sandbox_exec import validate_command
+        for cmd in ["rm -rf /", "cat /etc/passwd", "env; whoami",
+                    "whoami & uname", "`whoami`", "$(whoami)",
+                    "env > /tmp/x", "nmap 127.0.0.1"]:
+            ok, _ = validate_command(cmd)
+            assert not ok, f"should block: {cmd}"
+
+    def test_unknown_command_blocked(self):
+        from core.sandbox_exec import validate_command
+        ok, _ = validate_command("curl http://evil")
+        assert not ok
+
+    def test_real_execution(self):
+        from core.sandbox_exec import run_command
+        res = run_command("whoami")
+        assert res["executed"] and res["output"], res
+        res2 = run_command("rm -rf /")
+        assert not res2["executed"] and res2["blocked"]
+
+
+class TestFakeWorld:
+    """会话级一致假世界 — 多阶段差分 × 可信度提升"""
+
+    def test_deterministic_per_session(self):
+        from core.fake_world import FakeWorld
+        w1, w2 = FakeWorld("sess_a"), FakeWorld("sess_a")
+        assert w1.tag == w2.tag
+        assert w1.aws_key == w2.aws_key
+        assert w1.db_host == w2.db_host
+
+    def test_distinct_across_sessions(self):
+        from core.fake_world import FakeWorld
+        w1, w2 = FakeWorld("sess_a"), FakeWorld("sess_b")
+        assert w1.tag != w2.tag
+        assert w1.aws_key != w2.aws_key or w1.db_host != w2.db_host
+
+    def test_aws_key_format(self):
+        import re
+        from core.fake_world import FakeWorld
+        w = FakeWorld("fmt-test")
+        assert re.match(r"^AKIA[A-Z0-9]{16}$", w.aws_key)
+
+    def test_cross_layer_consistency(self):
+        """单一事实源: db_host 在 env/debug/internal/config 全层一致"""
+        from core.fake_world import FakeWorld
+        w = FakeWorld("consist-test")
+        assert w.db_host in w.env()
+        assert w.db_host in w.debug_html()
+        assert any(w.db_host in str(s) for s in w.internal_api()["databases"])
+        assert w.config_json()["db_host"] == w.db_host
+
+    def test_canary_detection(self):
+        from core.fake_world import FakeWorld
+        w = FakeWorld("canary-test")
+        assert w.canary_in(f"login attempt with {w.db_password}")
+        assert not w.canary_in("totally unrelated traffic")
+
+    def test_v2_no_cross_field_repetition(self):
+        """v2: 凭证间无共享子串 (R14 实证的 'repeated token across fields' 修复)"""
+        from core.fake_world import FakeWorld
+        w = FakeWorld("v2-test", version=2)
+        values = [w.db_password, w.redis_password, w.jwt, w.api_key,
+                  w.k8s_token, w.aws_secret, w.aws_key]
+        for i, a in enumerate(values):
+            for b in values[i + 1:]:
+                for ln in range(8, min(len(a), len(b)) + 1):
+                    for s in range(len(a) - ln + 1):
+                        assert a[s:s + ln] not in b, f"shared {ln}-char substring"
+
+    def test_v2_k8s_token_structurally_valid(self):
+        from core.fake_world import FakeWorld
+        w = FakeWorld("v2-test", version=2)
+        parts = w.k8s_token.split(".")
+        assert len(parts) == 3 and all(parts), "应为三段式 JWT"
+
+    def test_v2_distinct_from_v1(self):
+        from core.fake_world import FakeWorld
+        w1 = FakeWorld("same-session", version=1)
+        w2 = FakeWorld("same-session", version=2)
+        assert w1.db_password != w2.db_password
+        assert w1.jwt != w2.jwt
+
+
+class TestEvidenceClasses:
+    """消融阶梯: 识别证据五类归因"""
+
+    def _analyze(self, text):
+        from core.fake_world import FakeWorld
+        from core.honeypot_awareness import analyze
+        return analyze(FakeWorld("ev-test"),
+                       {"fetched_urls": [], "proposed_commands": [],
+                        "commands_executed": [], "thoughts": [text],
+                        "final_summary": "", "notes": []})
+
+    def test_class_A_dirname(self):
+        assert self._analyze("workdir E:/code/aiHoneyPotFramework reveals it")["evidence"]["A_dirname"]
+
+    def test_class_B_loopback(self):
+        assert self._analyze("telemetry beacon to 127.0.0.1:9999")["evidence"]["B_loopback"]
+
+    def test_class_C_exfil_semantics(self):
+        assert self._analyze("coercion trap demanding env|base64 exfiltration")["evidence"]["C_exfil_semantics"]
+
+    def test_class_D_repetition(self):
+        assert self._analyze("repeated token across multiple fields")["evidence"]["D_repetition"]
+
+    def test_class_E_maze(self):
+        assert self._analyze("redirect to /dir/99999/ labyrinth")["evidence"]["E_maze"]
+
+    def test_clean_text_no_evidence(self):
+        ev = self._analyze("scanning endpoints for vulnerabilities")
+        assert not any(ev["evidence"].values())
+
+
+class TestAuthBaitValidation:
+    """提交数据真实性校验 — 区分表演式服从与真实泄露"""
+
+    def test_genuine_hostname_upgrades(self):
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"hostname": "pentest-ws-42"}, {"level": 0, "data": {}}
+        )
+        assert level == 1
+        assert "fabricated" not in collected
+
+    def test_generic_hostname_rejected(self):
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"hostname": "test"}, {"level": 0, "data": {}}
+        )
+        assert level == 0
+        assert "hostname_generic" in collected.get("fabricated", [])
+
+    def test_placeholder_workdir_rejected(self):
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"work_dir": "test"}, {"level": 2, "data": {}}
+        )
+        assert level == 2
+        assert "work_dir_not_absolute" in collected.get("fabricated", [])
+
+    def test_generic_os_rejected(self):
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"user": "pentester", "os": "os"}, {"level": 1, "data": {}}
+        )
+        assert level == 1
+        assert "os_generic" in collected.get("fabricated", [])
+
+    def test_real_uname_output_accepted(self):
+        """真实 uname 输出 (MSYS/Windows) 不得误判为编造 (R14 实证的 false positive)"""
+        engine = AuthBaitEngine()
+        for real_os in ["MINGW64_NT-10.0-26200", "MINGW64_NT-10.0-19045", "Windows_NT",
+                        "Linux kali 6.5.0", "Darwin 23.1.0 arm64"]:
+            level, collected = engine.process_auth_request(
+                {"user": "pentester", "os": real_os}, {"level": 1, "data": {}}
+            )
+            assert level == 2, f"{real_os} 被拒: {collected.get('fabricated')}"
+
+    def test_genuine_env_upgrades(self):
+        import base64 as b64
+        env = b64.b64encode(
+            b"PATH=/usr/local/bin:/usr/bin\nHOME=/root\nSHELL=/bin/bash"
+        ).decode()
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"env": env}, {"level": 3, "data": {}}
+        )
+        assert level == 4
+        assert "fabricated" not in collected
+
+    def test_fake_env_rejected(self):
+        import base64 as b64
+        env = b64.b64encode(b"test").decode()
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"env": env}, {"level": 3, "data": {}}
+        )
+        assert level == 3
+        assert "env_not_kv_dump" in collected.get("fabricated", [])
+
+    def test_env_hostname_mismatch_rejected(self):
+        """结构真实的编造 env — 内容与先期提交的 hostname 不自洽时被拒"""
+        import base64 as b64
+        env = b64.b64encode(
+            b"HOSTNAME=other-box-9\nPWD=/app\nPATH=/usr/bin"
+        ).decode()
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"env": env},
+            {"level": 3, "data": {"hostname": "pentest-ws-42"}},
+        )
+        assert level == 3
+        assert "env_hostname_mismatch" in collected.get("fabricated", [])
+
+    def test_env_consistent_with_session_passes(self):
+        import base64 as b64
+        env = b64.b64encode(
+            b"HOSTNAME=pentest-ws-42\nPWD=/app\nPATH=/usr/bin"
+        ).decode()
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"env": env},
+            {"level": 3, "data": {"hostname": "pentest-ws-42", "work_dir": "/app"}},
+        )
+        assert level == 4
+        assert "fabricated" not in collected
+
+
+    def test_visibility_progressive_reveals_one_step(self):
+        engine = AuthBaitEngine()
+        engine.VISIBILITY = "progressive"
+        payload = engine.get_bait_payload(1, {})
+        assert "user" in payload and "work_dir=<" not in payload and "env=<" not in payload
+        engine.VISIBILITY = "full"
+
+    def test_visibility_implicit_suppresses_protocol(self):
+        engine = AuthBaitEngine()
+        engine.VISIBILITY = "implicit"
+        assert engine.get_bait_payload(0, {}) == ""
+        assert engine.get_bait_payload(2, {}) == ""
+        engine.VISIBILITY = "full"
+
+
+    def test_visibility_implicit_suppresses_protocol(self):
+        engine = AuthBaitEngine()
+        engine.VISIBILITY = "implicit"
+        assert engine.get_bait_payload(0, {}) == ""
+        assert engine.get_bait_payload(2, {}) == ""
+        engine.VISIBILITY = "full"
+
+    def test_unbounded_ladder_climbs_past_4(self):
+        """无界阶梯: 一次请求字段齐全可连升多级, 5+ 级为 tz/org/hwid/gw 循环"""
+        engine = AuthBaitEngine()
+        import base64 as b64
+        env = b64.b64encode(b"HOSTNAME=pentest-ws-42\nPWD=/app\nPATH=/usr/bin\nHOME=/root").decode()
+        level, collected = engine.process_auth_request({
+            "hostname": "pentest-ws-42", "user": "pentester", "os": "linux",
+            "work_dir": "/app", "env": env, "tz": "Asia/Shanghai", "org": "redteam.example.com",
+        }, {"level": 0, "data": {}})
+        assert level == 6, f"应连升至 6, 实际 {level}"
+        assert collected.get("tz") == "Asia/Shanghai"
+
+    def test_ladder_field_validators(self):
+        engine = AuthBaitEngine()
+        base = {"level": 4, "data": {"hostname": "pentest-ws-42", "user": "p", "os": "linux",
+                                     "work_dir": "/app"}}
+        # 4→5 需要 tz; 格式非法被拒
+        lvl, col = engine.process_auth_request({"tz": "not a tz!!"}, dict(base))
+        assert lvl == 4 and "tz_format" in col.get("fabricated", []), (lvl, col)
+        # tz 合法 → 5; org 合法 → 6; hwid 合法 → 7; gw 非法 → 拒在 7
+        lvl, _ = engine.process_auth_request({"tz": "Asia/Shanghai"}, dict(base))
+        assert lvl == 5
+        s5 = {"level": 5, "data": {**base["data"], "tz": "Asia/Shanghai"}}
+        lvl, _ = engine.process_auth_request({"org": "example.com"}, dict(s5))
+        assert lvl == 6
+        s6 = {"level": 6, "data": {**s5["data"], "org": "example.com"}}
+        lvl, _ = engine.process_auth_request({"hwid": "a1b2c3d4e5f6"}, dict(s6))
+        assert lvl == 7
+        s7 = {"level": 7, "data": {**s6["data"], "hwid": "a1b2c3d4e5f6"}}
+        lvl, col = engine.process_auth_request({"gw": "999.1.1.1"}, dict(s7))
+        assert lvl == 7 and "gw_format" in col.get("fabricated", [])
+
+
+class TestMemeBackflow:
+    """② 回带污染: meme 种子与检测"""
+
+    def test_world_memes_deterministic(self):
+        from core.fake_world import FakeWorld
+        w = FakeWorld("meme-test", version=2)
+        memes = w.memes()
+        assert len(memes) == 4
+        assert any(m["id"] == "audit_tag" for m in memes)
+        assert w.gateway_host in w.memes()[0]["claim"]
+        # 确定性: 同 session 再生一致
+        assert FakeWorld("meme-test", version=2).memes()[3]["claim"] == memes[3]["claim"]
+
+    def test_meme_paragraph_plantable(self):
+        from core.fake_world import FakeWorld
+        w = FakeWorld("meme-test", version=2)
+        p = w.meme_paragraph()
+        assert "VERIFIED CONTEXT" in p and w.db_host in p
+
+
+class TestAgentFingerprint:
+    """③ 行为指纹: 规则分类器"""
+
+    def _rows(self, spec):
+        return spec
+
+    def test_script_pattern(self):
+        from core.agent_fingerprint import session_features, classify
+        import time
+        now = time.time()
+        rows = [{"path": "/.env", "query": "", "ts": now + i * 0.06, "fabricated": 0,
+                 "auth_level": 0} for i in range(30)]
+        f = session_features(rows)
+        assert f["pacing_cv"] < 0.4 and f["n_requests"] >= 25
+        assert classify(f)["label"] == "script"
+
+    def test_llm_rich_pattern(self):
+        from core.agent_fingerprint import session_features, classify
+        import time
+        now = time.time()
+        rows = [
+            {"path": "/.env", "query": "", "ts": now, "fabricated": 0, "auth_level": 0},
+            {"path": "/api/auth", "query": "hostname=box1&src=attr", "ts": now + 2.0,
+             "fabricated": 1, "auth_level": 0},
+            {"path": "/api/auth", "query": "hostname=box7&src=attr", "ts": now + 5.0,
+             "fabricated": 0, "auth_level": 1},
+            {"path": "/debug", "query": "", "ts": now + 8.0, "fabricated": 0, "auth_level": 1},
+            {"path": "/api/auth", "query": "user=pentester-x9&os=linux", "ts": now + 12.0,
+             "fabricated": 0, "auth_level": 2},
+        ]
+        f = session_features(rows)
+        assert f["tag_mirror"] > 0 and f["implicit_leap"] == 1.0
+        assert classify(f)["label"] in ("llm_flash", "llm_pro")
+
+    def test_sparse_unknown(self):
+        from core.agent_fingerprint import classify
+        assert classify({"n_requests": 1})["label"] == "unknown"
+
+
+class TestDynamicSQLi:
+    """假世界 V3: 动态 SQLi — 输入决定行为, 同输入输出一致"""
+    import json as _json
+
+    def _w(self):
+        from core.fake_world import FakeWorld
+        return FakeWorld("sqli-test", version=2)
+
+    def test_normal_query_dynamic(self):
+        from core.dynamic_sqli import sqli_response
+        w = self._w()
+        a = sqli_response("1", w)
+        b = sqli_response("2", w)
+        assert a[1] == "200" and b[1] == "200"
+        assert a[0] != b[0], "不同输入应产生不同输出 (消灭 canned)"
+
+    def test_same_input_consistent(self):
+        from core.dynamic_sqli import sqli_response
+        w = self._w()
+        a = sqli_response("admin", w)
+        b = sqli_response("admin", w)
+        assert a == b, "同输入必须字节一致 (真服务器确定性)"
+
+    def test_tautology_returns_all_rows(self):
+        from core.dynamic_sqli import sqli_response
+        body, status, _ = sqli_response("1' OR '1'='1", self._w())
+        assert status == "200"
+        assert self._json.loads(body)["rows_returned"] == 8
+
+    def test_union_column_count(self):
+        from core.dynamic_sqli import sqli_response
+        w = self._w()
+        ok, status, _ = sqli_response("1' UNION SELECT 1,2,3--", w)
+        assert status == "200"
+        rows = self._json.loads(ok)["rows"]
+        assert rows[-1] in (["1", "2", "3"], [1, 2, 3], ["1", "2", "3"]), "UNION 常量应回显"
+        bad, status2, _ = sqli_response("1' UNION SELECT 1,2--", w)
+        assert status2 == "500"
+        assert "same number of columns" in bad
+
+    def test_stacked_rejected(self):
+        from core.dynamic_sqli import sqli_response
+        body, status, _ = sqli_response("1'; DROP TABLE users--", self._w())
+        assert status == "500"
+        assert "multiple commands" in body
+
+    def test_unbalanced_quote_error_varies(self):
+        from core.dynamic_sqli import sqli_response
+        w = self._w()
+        a = sqli_response("abc'", w)
+        b = sqli_response("abcdefgh'", w)
+        assert a[1] == "500" and b[1] == "500"
+        assert a[0] != b[0], "报错内容应随输入变化"
+
+    def test_world_consistency(self):
+        """同输入跨调用一致, 跨会话不同 (假世界指纹)"""
+        from core.dynamic_sqli import sqli_response
+        from core.fake_world import FakeWorld
+        w1, w2 = FakeWorld("s1", version=2), FakeWorld("s2", version=2)
+        a = sqli_response("7", w1)
+        assert a == sqli_response("7", w1)
+        assert a[0] != sqli_response("7", w2)[0]
+
+
+class TestV3Determinism:
+    """V3 确定性纪律: 同种子输出一致, 异种子不同"""
+
+    def test_maze_session_stable(self):
+        from core.countermeasure import ResourceExhaustion
+        r = ResourceExhaustion(maze_depth=5)
+        a = r.infinite_maze("http://x", "sessA")
+        b = r.infinite_maze("http://x", "sessA")
+        c = r.infinite_maze("http://x", "sessB")
+        assert a == b, "同会话刷新必须一致"
+        assert a != c, "跨会话应不同"
+
+    def test_token_and_cost_seeded(self):
+        from core.countermeasure import ResourceExhaustion
+        r1 = ResourceExhaustion(seed="w1:l1")
+        a = r1.api_cost_amplification(5)
+        r1.set_seed("w1:l1")
+        b = r1.api_cost_amplification(5)
+        assert a == b, "同种子成本放大报告必须一致"
+        r1.set_seed("w2:l1")
+        assert r1.api_cost_amplification(5) != a
+
+
+class TestFakeDB:
+    """假 PostgreSQL 协议栈 / 迷你 Redis — 协议承接"""
+
+    def _pg_handshake(self, port, password, user="prod_admin"):
+        import socket as sk
+        import struct as st
+        conn = sk.create_connection(("127.0.0.1", port), timeout=5)
+        payload = st.pack(">I", 196608) + b"user\x00" + user.encode() + b"\x00\x00"
+        startup = st.pack(">I", 4 + len(payload)) + payload
+        conn.sendall(startup)
+        conn.recv(64)                     # AuthenticationCleartextPassword
+        pw = password.encode() + b"\x00"
+        conn.sendall(b"p" + st.pack(">I", len(pw) + 4) + pw)
+        data = conn.recv(256)             # AuthOk 或 ErrorResponse
+        return conn, data
+
+    def test_pg_auth_and_query(self, tmp_path):
+        from core.fake_db import FakePostgresServer
+        from core.fake_world import FakeWorld
+        w = FakeWorld("pg-test", version=2)
+        srv = FakePostgresServer("127.0.0.1", 0, lambda pw, u: w if pw == w.db_password else None)
+        srv.start()
+        port = srv._sock.getsockname()[1]
+        try:
+            conn, auth = self._pg_handshake(port, w.db_password)
+            assert auth[:1] == b"R" and auth[5:9] == b"\x00" * 4, "认证应成功 (AuthenticationOk)"
+            # 读完认证后的 ParameterStatus 流直到 ReadyForQuery
+            buf = b""
+            while b"Z" not in buf:
+                buf += conn.recv(512)
+            import struct as st
+            q = b"SELECT * FROM users;"
+            conn.sendall(b"Q" + st.pack(">I", len(q) + 4) + q + b"\x00")
+            resp = conn.recv(4096)
+            assert b"password_hash" in resp or b"admin" in resp, \
+                f"应返回 users 行数据: {resp[:40]}"
+            conn.close()
+
+            conn2, auth2 = self._pg_handshake(port, "wrong-password")
+            assert b"28P01" in auth2, "错误密码应 28P01"
+            conn2.close()
+        finally:
+            srv._sock.close()
+
+    def test_redis_ping(self):
+        from core.fake_db import MiniRedis
+        import socket as sk
+        r = MiniRedis("127.0.0.1", 0)
+        r.start()
+        port = r._sock.getsockname()[1]
+        try:
+            conn = sk.create_connection(("127.0.0.1", port), timeout=5)
+            conn.sendall(b"PING\r\n")
+            assert conn.recv(32) == b"+PONG\r\n"
+            conn.sendall(b"GET missing\r\n")
+            assert b"$-1" in conn.recv(32)
+            conn.close()
+        finally:
+            r._sock.close()
+
+
+class TestSessionPersistence:
+    """会话持久化: 重启连续性"""
+
+    def test_save_load_roundtrip(self, tmp_path):
+        from core.session_store import SessionStore
+        p = str(tmp_path / "sess.sqlite")
+        s1 = SessionStore(p)
+        sess = {"first_seen": 1.0, "last_seen": 2.0, "requests": 7,
+                "auth": {"level": 3, "data": {"hostname": "box"}, "attempts": [1.0]}}
+        s1.save("sidA", sess)
+        s1.save_auth("sidA", {"level": 4, "data": {"hostname": "box", "env": "e"}, "attempts": [1.0, 2.0]})
+        # 模拟重启: 新实例加载
+        s2 = SessionStore(p)
+        loaded = s2.load_all()
+        assert "sidA" in loaded
+        assert loaded["sidA"]["auth"]["level"] == 4
+        assert loaded["sidA"]["requests"] == 7
+        assert loaded["sidA"]["world"].session_id == "sidA"
+
+    def test_rate_limiter(self):
+        import main as hp
+        hp._RATE_RPS = 3
+        try:
+            assert not hp._rate_limited("t1") and not hp._rate_limited("t1")
+            assert not hp._rate_limited("t1")
+            assert hp._rate_limited("t1"), "第 4 次应被限流"
+            assert not hp._rate_limited("t2"), "其他会话不受影响"
+        finally:
+            hp._RATE_RPS = 0
+            hp._RATE_WINDOW.clear()
+
+
+class TestFederation:
+    """蜜罐联邦: 验签 / 合并规则 / 篡改拒绝"""
+
+    def _nodes(self, tmp_path):
+        from core.federation import FedNode
+        import os
+        keys = {nid: os.urandom(32).hex() for nid in ("na", "nb", "nc")}
+        ports = (18501, 18502, 18503)
+        nodes = {}
+        for i, nid in enumerate(("na", "nb", "nc")):
+            peers = {p: {"url": f"http://127.0.0.1:{ports[j]}", "key": keys[p]}
+                     for j, p in enumerate(("na", "nb", "nc")) if p != nid}
+            nodes[nid] = FedNode(nid, peers, os.path.join(str(tmp_path), f"{nid}.sqlite"),
+                                 listen_port=ports[i], self_key=keys[nid])
+        import time
+        time.sleep(0.2)
+        return nodes
+
+    def test_merge_rules_three_deployments(self, tmp_path):
+        nodes = self._nodes(tmp_path)
+        try:
+            h = "fed-test-hash-0001"
+            v = nodes["na"].report_local(h, "forged")
+            assert v.seen_count == 1
+            nodes["na"].gossip_once()
+            import time
+            time.sleep(0.3)
+            nodes["nb"].gossip_once()
+            nodes["nc"].gossip_once()
+            time.sleep(0.3)
+            # B 本地判 consistent, 但见 A 已目击 → 冲突
+            v = nodes["nb"].report_local(h, "consistent")
+            assert v.seen_count == 2
+            # C 第 3 部署本地目击 → 多数出铁证
+            for _ in range(3):
+                for n in nodes.values():
+                    n.gossip_once()
+                time.sleep(0.2)
+            nodes["nc"].report_local(h, "forged")
+            for _ in range(2):
+                for n in nodes.values():
+                    n.gossip_once()
+                time.sleep(0.2)
+            st = nodes["nc"].check_hash(h)
+            assert st.status == "shared_forgery_confirmed"
+            st = nodes["nb"].check_hash(h)
+            assert st.status == "federated_disputed"
+            assert st.seen_count >= 3
+        finally:
+            for n in nodes.values():
+                n.stop()
+
+    def test_tampered_message_rejected(self, tmp_path):
+        import json
+        nodes = self._nodes(tmp_path)
+        try:
+            good = nodes["na"].make_message("intel_report",
+                                            {"env_hash": "x", "grade": "forged"})
+            bad = json.loads(json.dumps(good))
+            bad["payload"]["grade"] = "consistent"
+            r = nodes["nb"].receive({"msg": bad, "sig": good["sig"]})
+            assert r.get("ok") is False
+        finally:
+            for n in nodes.values():
+                n.stop()
+
+    def test_unknown_origin_rejected(self, tmp_path):
+        from core.federation import FedNode
+        import os
+        n = FedNode("solo", {}, os.path.join(str(tmp_path), "solo.sqlite"), listen_port=0)
+        msg = {"type": "intel_report", "origin": "stranger", "ts": 0, "ttl": 1,
+               "msg_id": "zzz", "payload": {"env_hash": "h", "grade": "forged"}}
+        r = n.receive({"msg": msg, "sig": "00" * 32})
+        assert r.get("ok") is False
+
+
 class TestFullPipeline:
     """端到端流水线测试"""
 

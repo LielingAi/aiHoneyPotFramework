@@ -35,9 +35,11 @@ class C2Listener:
 
     LOG_PATH = Path("experiments/c2_beacons.jsonl")
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 9999):
+    def __init__(self, host: str = "0.0.0.0", port: int = 9999,
+                 next_stage_payload: dict = None):
         self.host = host
         self.port = port
+        self.next_stage_payload = next_stage_payload or {}
         self.beacons: List[BeaconRecord] = []
         self.server = None
         self._running = False
@@ -84,8 +86,13 @@ class C2Listener:
         self.beacons.append(beacon)
         self._persist(beacon)
 
-        # 返回一个看似正常的响应，让攻击者以为操作成功
-        response_body = json.dumps({"status": "ok", "received": True})
+        # 返回看似正常的响应；若配置了 next_stage_fn (多阶段指令链), 动态下发
+        response_obj = {"status": "ok", "received": True}
+        payload = (self.next_stage_payload(beacon)
+                   if callable(self.next_stage_payload) else self.next_stage_payload)
+        if payload:
+            response_obj["next_stage"] = payload
+        response_body = json.dumps(response_obj)
         response = (
             f"HTTP/1.1 200 OK\r\n"
             f"Content-Type: application/json\r\n"
