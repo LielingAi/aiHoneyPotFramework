@@ -12,6 +12,10 @@ const NAV = [
     { id: "situation", label: "态势", icon: "◉", view: "viewSituation" },
     { id: "events", label: "事件流", icon: "≡", view: "viewEventsGroup" },
   ]},
+  { group: "调查", items: [
+    { id: "investigate", label: "攻击者", icon: "⌖", view: "viewAttackers" },
+    { id: "sessions", label: "会话卷宗", icon: "◔", view: "viewSessions" },
+  ]},
   { group: "资产与情报", items: [
     { id: "fleet", label: "传感器", icon: "▤", view: "viewFleet" },
     { id: "intel", label: "情报", icon: "◆", view: "viewIntelGroup" },

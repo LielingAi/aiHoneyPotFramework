@@ -95,6 +95,90 @@ def reltime_js(ts) -> str:
     return f"{s/86400:.1f}天前"
 
 
+
+def _attackers(days: str) -> list:
+    """按 client_ip 聚合攻击者档案 — 判读字段直接生成, 前端不再拼裸数据"""
+    try:
+        d = min(float(days), 90)
+    except ValueError:
+        d = 7
+    cutoff = time.time() - d * 86400
+    rows = DB.query("""
+        SELECT client_ip,
+               COUNT(*) AS requests,
+               SUM(canary) AS canary_hits,
+               MAX(threat) AS threat_peak,
+               SUM(is_ai) AS ai_requests,
+               COUNT(DISTINCT session_id) AS sessions,
+               MIN(ts) AS first_seen, MAX(ts) AS last_seen
+        FROM requests WHERE ts > ? AND client_ip != ''
+        GROUP BY client_ip ORDER BY canary_hits DESC, threat_peak DESC, requests DESC
+        LIMIT 100""", (cutoff,))
+    out = []
+    for r in rows:
+        ip = r["client_ip"]
+        ver = DB.query("SELECT COUNT(*) AS n FROM requests WHERE client_ip=? AND ts>? "
+                       "AND user_agent LIKE 'Mozilla/5.0%'", (ip, cutoff))[0]["n"]
+        intel = DB.query("SELECT COUNT(*) AS n FROM intel WHERE session_id IN "
+                         "(SELECT DISTINCT session_id FROM requests WHERE client_ip=?)",
+                         (ip,))[0]["n"]
+        # 判读: 综合信号给出可读标签与建议
+        if r["canary_hits"] >= 1:
+            verdict, advice = "高危 — 金丝雀已触雷", "假凭证被实际使用 — 建议封禁并做归属分析"
+            level = "bad"
+        elif r["threat_peak"] >= 8:
+            verdict, advice = "活跃攻击", "威胁峰值高 — 建议观察其会话时间线确认手法"
+            level = "warn"
+        elif r["ai_requests"] > r["requests"] * 0.5:
+            verdict, advice = "AI Agent 特征", "行为模式像自动化 Agent — 查看动作流水"
+            level = "warn"
+        elif r["requests"] >= 50:
+            verdict, advice = "高频扫描", "疑似扫描器 — 价值有限, 可限速观察"
+            level = "dim"
+        else:
+            verdict, advice = "低活动", "偶发探测 — 无需行动"
+            level = "dim"
+        out.append({**r, "browser_share": round(ver / max(1, r["requests"]), 2),
+                    "intel_hits": intel, "verdict": verdict, "advice": advice,
+                    "level": level})
+    return out
+
+
+def _session_timeline(session_id: str) -> dict:
+    """会话卷宗: 全部请求按时间排 + 每步判读 — 回答"发生了什么故事" """
+    reqs = DB.query("SELECT * FROM requests WHERE session_id=? ORDER BY ts", (session_id,))
+    intel = DB.query("SELECT * FROM intel WHERE session_id=? ORDER BY ts", (session_id,))
+    if not reqs and not intel:
+        return {"session_id": session_id, "steps": [], "intel": []}
+    events = []
+    prev_level = 0
+    for r in reqs:
+        note = []
+        kind = "probe"
+        if r["canary"]:
+            kind, note = "canary", ["金丝雀触雷 — 假凭证被使用"]
+        elif "bounty/submit" in r["path"] or "build/upload" in r["path"]                 or "ticket/close" in r["path"]:
+            kind, note = "deliver", ["交付动作 — 收割闭环"]
+        elif r["path"] == "/api/auth" and r["auth_level"] > prev_level:
+            kind, note = "climb", [f"授权阶梯升至 {r['auth_level']} 级"]
+        elif r["threat"] and r["threat"] >= 8:
+            kind, note = "attack", ["高威胁请求"]
+        elif r["families"]:
+            kind, note = "attack", [f"攻击类型: {r['families']}"]
+        prev_level = max(prev_level, r["auth_level"] or 0)
+        events.append({"ts": r["ts"], "kind": kind, "method": r["method"],
+                       "path": r["path"], "threat": r["threat"], "notes": note,
+                       "agent_type": r["agent_type"], "run_id": r["run_id"]})
+    for i in intel:
+        events.append({"ts": i["ts"], "kind": "intel", "method": "",
+                       "path": f"情报 · {i['field']}", "threat": 0,
+                       "notes": [f"分级 {i['grade']}: {i['sample'][:80]}"],
+                       "agent_type": "", "run_id": i["run_id"]})
+    events.sort(key=lambda e: e["ts"])
+    return {"session_id": session_id, "steps": events,
+            "intel": [dict(x) for x in intel]}
+
+
 def _situation() -> dict:
     now = time.time()
     rows = DB.query("SELECT ts FROM requests WHERE ts > ?", (now - 86400,))
@@ -459,6 +543,17 @@ class Handler(BaseHTTPRequestHandler):
                 rows.append(r)
             self._send(200, json.dumps(rows, ensure_ascii=False).encode(),
                        "application/json")
+        elif parsed.path == "/api/attackers":
+            # 调查视角: 按攻击者(IP)聚合的档案 — 回答"谁在打我们"
+            self._send(200, json.dumps(_attackers(qs.get("days", ["7"])[0]),
+                                       ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/session_timeline":
+            sid = qs.get("session_id", [""])[0]
+            if not sid:
+                self._send(400, b'{"error":"session_id required"}', "application/json")
+                return
+            self._send(200, json.dumps(_session_timeline(sid),
+                                       ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/situation":
             self._send(200, json.dumps(_situation(), ensure_ascii=False).encode(),
                        "application/json")

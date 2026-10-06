@@ -64,6 +64,8 @@ const api = {
   events: (params) => get("events", { limit: 100, ...params }),
   intel: (params) => get("intel", { limit: 60, ...params }),
   requests: (params) => get("requests", { limit: 100, ...params }),
+  attackers: (days) => get("attackers", { days }),
+  sessionTimeline: (session_id) => get("session_timeline", { session_id }),
   get,
   post,
 };

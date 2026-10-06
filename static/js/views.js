@@ -3,8 +3,8 @@
 const api = HP.api;
 const { sseUrl, stixUrl } = HP;
 const { h, esc, fmtPct, fmtNum, relTime, pill, gradePill, table, statCard,
-        pageHead, barRows, histogram, openDrawer, kvList, toast, skeleton,
-        tabs, $ } = HP.ui;
+        pageHead, barRows, histogram, openDrawer, closeDrawer, kvList, toast,
+        skeleton, tabs, $ } = HP.ui;
 /* 视图层 — 每页一个渲染函数, 只消费 /api/*, 业务逻辑零改动 */
 
 /* ---------- 态势 (产品门面: 聚合全站高频信号) ---------- */
@@ -44,7 +44,9 @@ async function viewSituation(ctx) {
   function renderThreat(rows) {
     if (!rows?.length) { threatBody.replaceChildren(h("div", { class: "empty" }, "暂无事件")); return; }
     threatBody.replaceChildren(...rows.slice(0, 9).map((r) =>
-      h("div", { class: "threat-item" },
+      h("div", { class: "threat-item", style: "cursor:pointer",
+        onclick: () => { sessionStorage.setItem("pending_sid", r.session_id);
+                         location.hash = "#/sessions"; } },
         h("span", { class: "time" }, relTime(r.ts)),
         h("b", { style: "color:var(--accent);width:38px" }, r.method || "GET"),
         h("span", { class: "path" }, r.path),
@@ -564,7 +566,11 @@ async function viewRequests(ctx) {
         ["威胁值", r.threat], ["攻击类型", r.families], ["授权级别", r.auth_level],
         ["运行", r.run_id], ["时间", relTime(r.ts)]]),
       h("div", { class: "t muted" }, "User-Agent"), h("pre", {}, r.user_agent || ""),
-      r.query ? h("div", {}, h("div", { class: "t muted" }, "Query"), h("pre", {}, r.query)) : null)) }));
+      r.query ? h("div", {}, h("div", { class: "t muted" }, "Query"), h("pre", {}, r.query)) : null,
+      h("button", { class: "btn primary", style: "margin-top:12px", onclick: () => {
+        sessionStorage.setItem("pending_sid", r.session_id);
+        location.hash = "#/sessions";
+        closeDrawer(); } }, "查看该会话的完整卷宗 →"))) }));
   }
   search.addEventListener("input", render);
   async function load() {
@@ -661,4 +667,121 @@ HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
              viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
              viewEvents, viewIntel, viewRequests, viewRuns,
              viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
+
+
+/* ---------- 调查: 攻击者档案 ("谁在打我们") ---------- */
+const VERDICT_KIND = { bad: "bad", warn: "warn", dim: "dim" };
+
+async function viewAttackers(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("攻击者", "按来源 IP 聚合的档案 — 按危险度排序, 点卡片看会话"));
+  let days = "7";
+  const box = h("div", {});
+  const sel = h("select", { class: "ctl", onchange: (e) => { days = e.target.value; load(); } },
+    h("option", { value: "1" }, "今天"), h("option", { value: "7", selected: true }, "近 7 天"),
+    h("option", { value: "30" }, "近 30 天"));
+  root.append(h("div", { class: "toolbar" }, h("span", { class: "muted" }, "时间范围"), sel));
+  root.append(box);
+
+  async function load() {
+    const rows = await api.attackers(days);
+    if (!rows.length) { box.replaceChildren(h("div", { class: "empty" },
+      "该时间范围内没有攻击者 — 传感器接入后自动建档")); return; }
+    box.replaceChildren(h("div", { class: "grid c3" }, ...rows.map((r) => {
+      const card = h("div", { class: "card pad", style: "cursor:pointer" },
+        h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px" },
+          h("span", { class: "mono", style: "font-size:13px;font-weight:600" }, r.client_ip),
+          pill(r.verdict, VERDICT_KIND[r.level] || "dim")),
+        h("div", { class: "grid", style: "grid-template-columns:1fr 1fr;gap:6px 12px;font-size:12px" },
+          h("span", { class: "muted" }, "请求"), h("b", { class: "mono" }, String(r.requests)),
+          h("span", { class: "muted" }, "触雷"), h("b", { class: "mono",
+            style: r.canary_hits ? "color:var(--ok)" : "" }, String(r.canary_hits)),
+          h("span", { class: "muted" }, "威胁峰值"), h("b", { class: "mono" }, String(r.threat_peak ?? 0)),
+          h("span", { class: "muted" }, "会话"), h("b", { class: "mono" }, String(r.sessions)),
+          h("span", { class: "muted" }, "AI 占比"), h("b", { class: "mono" }, fmtPct(r.ai_requests / Math.max(1, r.requests)))),
+        h("div", { class: "d", style: "margin-top:8px;color:var(--faint);font-size:11.5px" },
+          `建议: ${r.advice}`),
+        h("div", { class: "d" }, `${relTime(r.first_seen)} 首次 · ${relTime(r.last_seen)} 最近`));
+      card.onclick = () => openDrawer(`攻击者 ${r.client_ip}`, h("div", {},
+        kvList([["IP", r.client_ip], ["判定", r.verdict], ["建议", r.advice],
+          ["请求 / 触雷 / 会话", `${r.requests} / ${r.canary_hits} / ${r.sessions}`],
+          ["威胁峰值", r.threat_peak], ["AI 请求占比", fmtPct(r.ai_requests / Math.max(1, r.requests))],
+          ["浏览器特征占比", fmtPct(r.browser_share)], ["关联情报", r.intel_hits + " 条"],
+          ["首次 / 最近", `${relTime(r.first_seen)} / ${relTime(r.last_seen)}`]]),
+        h("div", { class: "t muted", style: "margin-top:10px" },
+          "在「事件流 → 请求日志」中按该 IP 深挖 (搜索框输入 IP 即可)")));
+      return card;
+    })));
+  }
+  await load();
+  return { root, reload: load };
+}
+
+/* ---------- 调查: 会话卷宗 ("发生了什么故事") ---------- */
+const STEP_META = {
+  probe: ["···", "dim", "探测"], climb: ["▲", "info", "爬梯"],
+  attack: ["⚔", "warn", "攻击"], canary: ["⚡", "ok", "触雷"],
+  deliver: ["◈", "purple", "交付"], intel: ["◆", "info", "情报"],
+};
+
+async function viewSessions(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("会话卷宗", "输入会话 ID — 看一个攻击者从进入到触雷的完整故事"));
+  const input = h("input", { class: "search", style: "flex:1;min-width:260px",
+    placeholder: "会话 ID (如 exp_1791… / auto_… / 从任意表格行点击带入)" });
+  const pending = sessionStorage.getItem("pending_sid");
+  if (pending) { input.value = pending; sessionStorage.removeItem("pending_sid"); }
+  const btn = h("button", { class: "btn primary", onclick: () => load(input.value.trim()) }, "打开卷宗");
+  root.append(h("div", { class: "toolbar" }, input, btn));
+  const box = h("div", {});
+  root.append(box);
+  // 最近的触雷会话快捷入口
+  try {
+    const reqs = await api.requests({ limit: 60 });
+    const hot = reqs.filter((r) => r.canary || (r.threat || 0) >= 8).slice(0, 6);
+    if (hot.length) {
+      root.append(h("div", { class: "toolbar", style: "margin-top:4px" },
+        h("span", { class: "muted" }, "最近的火药味会话:"),
+        ...[...new Set(hot.map((r) => r.session_id))].map((sid) =>
+          h("button", { class: "ctl", onclick: () => { input.value = sid; load(sid); } },
+            sid.slice(0, 18)))));
+    }
+  } catch (_) {}
+
+  async function load(sid) {
+    if (!sid) { box.replaceChildren(h("div", { class: "empty" }, "输入会话 ID 开始")); return; }
+    box.replaceChildren(skeleton(6));
+    try {
+      const data = await api.sessionTimeline(sid);
+      if (!data.steps.length) { box.replaceChildren(h("div", { class: "empty" },
+        "没有这个会话的记录 — 检查 ID 或它属于其他传感器")); return; }
+      const t0 = data.steps[0].ts;
+      box.replaceChildren(h("div", { class: "card pad" },
+        h("div", { style: "margin-bottom:14px" },
+          h("span", { class: "mono" }, sid),
+          h("span", { class: "count", style: "margin-left:12px" },
+            `${data.steps.length} 步 · 跨度 ${((data.steps[data.steps.length-1].ts - t0) / 60).toFixed(1)} 分钟`)),
+        ...data.steps.map((st) => {
+          const [icon, kind, label] = STEP_META[st.kind] || STEP_META.probe;
+          const row = h("div", { class: "threat-item" },
+            h("span", { class: "time" }, "+" + ((st.ts - t0)).toFixed(0) + "s"),
+            pill(`${icon} ${label}`, kind),
+            h("b", { style: "color:var(--accent);width:44px" }, st.method || "·"),
+            h("span", { class: "path" }, st.path),
+            st.notes?.length ? h("span", { class: "faint", style: "font-size:11.5px" },
+              st.notes.join("; ")) : null);
+          return row;
+        })));
+    } catch (e) {
+      box.replaceChildren(h("div", { class: "empty" }, "加载失败: " + e.message));
+    }
+  }
+  if (input.value) load(input.value);
+  return { root };
+}
+
+/* 视图登记 */
+HP.views.viewAttackers = viewAttackers;
+HP.views.viewSessions = viewSessions;
+
 })();
