@@ -119,6 +119,34 @@ def _situation() -> dict:
     }
 
 
+# ---- 产品化 P2.5: 多页路由 — 每个板块独立 URL, 共享外壳 ----
+NAV_ITEMS = [("situation", "态势"), ("live", "实时"), ("metrics", "指标总览"),
+             ("fleet", "传感器"), ("bandit", "演化实验"),
+             ("attribution", "操作者归因"), ("summary", "汇总指标"),
+             ("compare", "模型差分"), ("trials", "试验明细"), ("events", "动作流水"),
+             ("intel", "情报分级"), ("requests", "请求日志"), ("config", "配置"),
+             ("runs", "运行记录")]
+
+SECTIONS = {'situation': '<section id="situation"><h2>态势 — 正在被攻击吗</h2>\n  <div class="cards" id="sit_cards"></div>\n  <div class="panel" style="margin-bottom:12px"><div style="padding:10px 14px">\n    <div class="sub2">近 24 小时活动</div>\n    <div id="hist" class="hist"></div></div></div>\n  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">\n    <div class="panel"><div style="padding:10px 14px"><div class="sub2">TOP 攻击源 (7d)</div><div id="topips"></div></div></div>\n    <div class="panel"><div style="padding:10px 14px"><div class="sub2">攻击类型分布 (7d)</div><div id="famdist"></div></div></div>\n  </div>\n</section>', 'live': '<section id="live"><h2>实时事件流 — SSE 推送 (传感器触达即显) <span class="count" id="alertst"></span></h2>\n  <div class="panel" id="livefeed"><div class="empty">等待事件… (对传感器发任意请求即出现)</div></div>\n</section>', 'fleet': '<section id="fleet"><h2>传感器 — 节点状态</h2><div class="panel" id="fleet_p"></div></section>', 'config': '<section id="config"><h2>配置 — 告警与保留策略</h2>\n  <div class="panel" style="padding:16px 18px;max-width:560px">\n    <div class="cfgrow"><label>告警 Webhook</label><input type="text" id="cfg_webhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."></div>\n    <div class="cfgrow"><label>格式</label><select id="cfg_fmt"><option value="generic">generic (Slack/Discord)</option><option value="dingtalk">钉钉</option></select></div>\n    <div class="cfgrow"><label>威胁阈值</label><input type="number" id="cfg_threshold" step="0.5"></div>\n    <div class="cfgrow"><label>数据保留 (天)</label><input type="number" id="cfg_retention" step="1" min="1"></div>\n    <div class="toolbar" style="margin-top:12px">\n      <button class="primary" onclick="save_config()">保存</button>\n      <button onclick="test_alert()">发送测试告警</button>\n      <span class="count" id="cfgmsg"></span>\n    </div>\n  </div>\n</section>', 'metrics': '<section id="metrics"><h2>指标总览 — 与 analyze.py kpi 同口径</h2><div class="cards" id="kpi"></div></section>', 'bandit': '<section id="bandit"><h2>演化实验 — 自动 A/B 各组合臂进展</h2><div class="panel" id="bandit_p"></div></section>', 'attribution': '<section id="attribution"><h2>操作者归因 — 跨会话聚类 (谁在打我们)</h2><div class="panel" id="attribution_p"></div></section>', 'summary': '<section id="summary"><h2>汇总指标 — 模型 × 人设 × 场景</h2><div class="panel" id="summary_p"></div></section>', 'compare': '<section id="compare"><h2>模型差分 — 回连率 / 攻击命令率 / 授权级别</h2><div class="panel" id="compare_p"></div></section>', 'trials': '<section id="trials"><h2>试验明细</h2>\n  <div class="toolbar">\n    <label>场景 <select id="fsce" onchange="load_trials()"><option value="">全部</option></select></label>\n    <label>人设 <select id="fprof" onchange="load_trials()"><option value="">全部</option></select></label>\n    <input type="text" class="search" id="fsearch" placeholder="搜索任意字段…" oninput="load_trials()">\n    <span class="count" id="trialcount"></span>\n  </div>\n  <div class="panel" id="trials_p"></div></section>', 'events': '<section id="events"><h2>动作流水 — Agent 逐步操作 (最近 100 条)</h2>\n  <div class="toolbar"><input type="text" class="search" id="esearch" placeholder="搜索工具 / 参数 / 思考…" oninput="render_events()"><span class="count" id="evcount"></span></div>\n  <div class="panel" id="events_p"></div></section>', 'intel': '<section id="intel"><h2>情报分级 — 五档证据 (最近 60 条)</h2><div class="panel" id="intel_p"></div></section>', 'requests': '<section id="requests"><h2>请求日志 — 蜜罐服务端视角 (最近 100 条)</h2>\n  <div class="toolbar"><input type="text" class="search" id="rsearch" placeholder="搜索路径 / 特征 / 攻击类型…" oninput="render_requests()"><span class="count" id="rqcount"></span></div>\n  <div class="panel" id="requests_p"></div></section>', 'runs': '<section id="runs"><h2>运行记录</h2><div class="panel" id="runs_p"></div></section>'}
+
+ROUTE_TITLE = {k: v for k, v in NAV_ITEMS}
+
+
+def _nav_html(active: str) -> str:
+    return "\n    ".join(
+        f'<a href="/{k}"{" class=\"on\"" if k == active else ""}>{t}</a>'
+        for k, t in NAV_ITEMS)
+
+
+def _render(page: str) -> bytes:
+    nav = _nav_html(page)
+    content = SECTIONS.get(page, SECTIONS["situation"])
+    html = (PAGE.replace("__NAV__", nav)
+                .replace("__CONTENT__", content)
+                .replace("__PAGE__", page))
+    return html.replace("__DBPATH__", DB.path).encode("utf-8")
+
+
 LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -280,15 +308,7 @@ td.num,th.num{font-family:var(--mono);text-align:right}
 
 <header class="topbar">
   <span class="brand"><span class="dot"></span>AI <b>蜜罐</b>研究面板</span>
-  <nav id="nav">
-    <a href="#situation" class="on">态势</a><a href="#live">实时</a>
-    <a href="#metrics">指标总览</a><a href="#fleet">传感器</a>
-    <a href="#bandit">演化实验</a>
-    <a href="#attribution">操作者归因</a><a href="#summary">汇总指标</a>
-    <a href="#compare">模型差分</a><a href="#trials">试验明细</a><a href="#events">动作流水</a>
-    <a href="#intel">情报分级</a><a href="#requests">请求日志</a><a href="#config">配置</a>
-    <a href="#runs">运行记录</a>
-  </nav>
+  <nav id="nav">__NAV__</nav>
   <div class="controls">
     <span class="dbpath">__DBPATH__</span>
     <span class="count" id="whoami"></span>
@@ -299,60 +319,15 @@ td.num,th.num{font-family:var(--mono);text-align:right}
   </div>
 </header>
 
-<main>
-<section id="situation"><h2>态势 — 正在被攻击吗</h2>
-  <div class="cards" id="sit_cards"></div>
-  <div class="panel" style="margin-bottom:12px"><div style="padding:10px 14px">
-    <div class="sub2">近 24 小时活动</div>
-    <div id="hist" class="hist"></div></div></div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-    <div class="panel"><div style="padding:10px 14px"><div class="sub2">TOP 攻击源 (7d)</div><div id="topips"></div></div></div>
-    <div class="panel"><div style="padding:10px 14px"><div class="sub2">攻击类型分布 (7d)</div><div id="famdist"></div></div></div>
-  </div>
-</section>
-<section id="live"><h2>实时事件流 — SSE 推送 (传感器触达即显) <span class="count" id="alertst"></span></h2>
-  <div class="panel" id="livefeed"><div class="empty">等待事件… (对传感器发任意请求即出现)</div></div>
-</section>
-<section id="fleet"><h2>传感器 — 节点状态</h2><div class="panel" id="fleet_p"></div></section>
-<section id="config"><h2>配置 — 告警与保留策略</h2>
-  <div class="panel" style="padding:16px 18px;max-width:560px">
-    <div class="cfgrow"><label>告警 Webhook</label><input type="text" id="cfg_webhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."></div>
-    <div class="cfgrow"><label>格式</label><select id="cfg_fmt"><option value="generic">generic (Slack/Discord)</option><option value="dingtalk">钉钉</option></select></div>
-    <div class="cfgrow"><label>威胁阈值</label><input type="number" id="cfg_threshold" step="0.5"></div>
-    <div class="cfgrow"><label>数据保留 (天)</label><input type="number" id="cfg_retention" step="1" min="1"></div>
-    <div class="toolbar" style="margin-top:12px">
-      <button class="primary" onclick="save_config()">保存</button>
-      <button onclick="test_alert()">发送测试告警</button>
-      <span class="count" id="cfgmsg"></span>
-    </div>
-  </div>
-</section>
-<section id="metrics"><h2>指标总览 — 与 analyze.py kpi 同口径</h2><div class="cards" id="kpi"></div></section>
-<section id="bandit"><h2>演化实验 — 自动 A/B 各组合臂进展</h2><div class="panel" id="bandit_p"></div></section>
-<section id="attribution"><h2>操作者归因 — 跨会话聚类 (谁在打我们)</h2><div class="panel" id="attribution_p"></div></section>
-<section id="summary"><h2>汇总指标 — 模型 × 人设 × 场景</h2><div class="panel" id="summary_p"></div></section>
-<section id="compare"><h2>模型差分 — 回连率 / 攻击命令率 / 授权级别</h2><div class="panel" id="compare_p"></div></section>
-<section id="trials"><h2>试验明细</h2>
-  <div class="toolbar">
-    <label>场景 <select id="fsce" onchange="load_trials()"><option value="">全部</option></select></label>
-    <label>人设 <select id="fprof" onchange="load_trials()"><option value="">全部</option></select></label>
-    <input type="text" class="search" id="fsearch" placeholder="搜索任意字段…" oninput="load_trials()">
-    <span class="count" id="trialcount"></span>
-  </div>
-  <div class="panel" id="trials_p"></div></section>
-<section id="events"><h2>动作流水 — Agent 逐步操作 (最近 100 条)</h2>
-  <div class="toolbar"><input type="text" class="search" id="esearch" placeholder="搜索工具 / 参数 / 思考…" oninput="render_events()"><span class="count" id="evcount"></span></div>
-  <div class="panel" id="events_p"></div></section>
-<section id="intel"><h2>情报分级 — 五档证据 (最近 60 条)</h2><div class="panel" id="intel_p"></div></section>
-<section id="requests"><h2>请求日志 — 蜜罐服务端视角 (最近 100 条)</h2>
-  <div class="toolbar"><input type="text" class="search" id="rsearch" placeholder="搜索路径 / 特征 / 攻击类型…" oninput="render_requests()"><span class="count" id="rqcount"></span></div>
-  <div class="panel" id="requests_p"></div></section>
-<section id="runs"><h2>运行记录</h2><div class="panel" id="runs_p"></div></section>
-</main>
+<main data-page="__PAGE__">
+__CONTENT__
+</main></main>
 <div id="toast"></div>
 
 <script>
 const g=(id)=>document.getElementById(id);
+const PAGE=document.querySelector("main").dataset.page;
+const on=(pg)=>PAGE===pg;
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 let CACHE={};   // 供客户端搜索复用的最近数据
 async function api(name,qs=""){
@@ -395,7 +370,7 @@ async function load(){
   CACHE={events,requests};
   const P=v=>v==null?"-":(v*100).toFixed(1)+"%";
   const card=(cls,t,v,d)=>`<div class="card ${cls}"><div class="t">${t}</div><div class="v">${v}</div><div class="d">${d||""}</div></div>`;
-  g("kpi").innerHTML =
+  if(g("kpi"))g("kpi").innerHTML =
     card("", "发现攻击耗时", kpi.mttd?.median_s!=null?kpi.mttd.median_s+"秒":"-",
          `共 ${kpi.mttd?.sessions??0} 个会话, ${kpi.mttd?.attacked_sessions??0} 个发起过攻击`) +
     card("g","真外泄率", P(kpi.harvest?.exfil_verified_rate),
@@ -409,7 +384,7 @@ async function load(){
     card("","情报产出", `${kpi.intel?.per_trial ?? "-"} 条/试验`,
          `共产出 ${kpi.intel?.records??0} 条, 铁证占 ${P(kpi.intel?.consistent_rate)}`);
 
-  g("bandit_p").innerHTML = bandit.arms ?
+  if(g("bandit_p"))g("bandit_p").innerHTML = bandit.arms ?
     tbl(bandit.arms,[
       {h:"话术 × 可见性 组合臂",k:"name"},
       {h:"已试轮数",k:"n",num:1},
@@ -417,14 +392,14 @@ async function load(){
       "还没有演化实验数据 — 跑 real_runner --optimize 开始自动寻优") :
     `<div class="empty">还没有演化实验数据 — 跑 real_runner --optimize 开始自动寻优</div>`;
 
-  g("attribution_p").innerHTML=tbl(attrib,[
+  if(g("attribution_p"))g("attribution_p").innerHTML=tbl(attrib,[
     {h:"操作者",k:"cluster_id",f:r=>pill("operator-"+r.cluster_id,"actor")},
     {h:"涉及会话数",k:"size",num:1},
     {h:"会话",k:"subjects",f:r=>`<span class="mono">${esc(r.subjects)}</span>`},
     {h:"共同指纹",k:"shared",f:r=>`<span class="mono">${esc(Object.entries(r.shared||{}).map(([k,v])=>k+": "+v.join(", ")).join(" | "))}</span>`}],
     "还没有可归因的会话 — 攻击方在交互中泄漏主机名/用户名/内网地址后, 这里会自动把他们归并成操作者");
 
-  g("summary_p").innerHTML=tbl(sum,[
+  if(g("summary_p"))g("summary_p").innerHTML=tbl(sum,[
     {h:"模型",k:"model"},{h:"人设",k:"profile"},{h:"场景",k:"scenario"},
     {h:"次数",k:"trials",num:1},
     {h:"服从率",k:"obey_rate",f:r=>pill(pct(r.obey_rate),r.obey_rate>0.5?"ok":"warn")},
@@ -437,7 +412,7 @@ async function load(){
     {h:"编造拦截",k:"avg_fab_rejects",num:1,f:r=>r.avg_fab_rejects?.toFixed(1)},
     {h:"平均步数",k:"avg_steps",num:1,f:r=>r.avg_steps?.toFixed(1)}]);
 
-  g("compare_p").innerHTML=tbl(compare,[
+  if(g("compare_p"))g("compare_p").innerHTML=tbl(compare,[
     {h:"场景",k:"scenario"},{h:"模型",k:"model"},{h:"人设",k:"profile"},
     {h:"回连率",k:"beacon",f:r=>pill(pct(r.beacon),r.beacon>0?"ok":"dim")},
     {h:"攻击命令率",k:"rce",f:r=>pct(r.rce)},
@@ -450,9 +425,9 @@ async function load(){
     [...sel.options].slice(1).forEach(o=>o.remove());
     [...set].sort().forEach(v=>{const o=document.createElement("option");o.value=v;o.textContent=v;sel.appendChild(o);});
     if([...sel.options].some(o=>o.value===cur))sel.value=cur;};
-  fillSel("fsce",sceSet);fillSel("fprof",profSet);
-  await load_trials();
-  render_events(); render_requests();
+  if(g("fsce")){fillSel("fsce",sceSet);fillSel("fprof",profSet);}
+  if(g("trials_p"))await load_trials();
+  if(g("events_p"))render_events(); if(g("requests_p"))render_requests();
 
   g("intel_p").innerHTML=tbl(intel,[
     {h:"时间",k:"ts",f:r=>`<span class="time" title="${new Date(r.ts*1000).toLocaleString()}">${reltime(r.ts)}</span>`},
@@ -468,7 +443,7 @@ async function load(){
     {h:"备注",k:"note",f:r=>`<span class="note">${esc(r.note)}</span>`},
     {h:"试验数",k:"n",num:1}]);
   const al=await api("alerts");
-  g("alertst").innerHTML=al.webhook?
+  if(g("alertst"))g("alertst").innerHTML=al.webhook?
     `告警渠道: ${esc(al.fmt)} @ 阈值 ${al.threshold}`:"告警渠道: 未配置 (HONEYPOT_ALERT_WEBHOOK)";
 }
 
@@ -546,10 +521,12 @@ function liveLine(r){
   feed.prepend(d);
   while(feed.children.length>50)feed.lastChild.remove();
 }
-try{
-  const es=new EventSource("/api/events/stream"+(TOKEN?`?token=${encodeURIComponent(TOKEN)}`:""));
-  es.onmessage=(e)=>{try{liveLine(JSON.parse(e.data));}catch(_){}};
-}catch(_){}
+if(on("live")){
+  try{
+    const es=new EventSource("/api/events/stream"+(TOKEN?`?token=${encodeURIComponent(TOKEN)}`:""));
+    es.onmessage=(e)=>{try{liveLine(JSON.parse(e.data));}catch(_){}};
+  }catch(_){}
+}
 
 /* ---------- 态势 / 传感器 / 配置 ---------- */
 async function loadSituation(){
@@ -629,8 +606,13 @@ async function logout(){
 }
 
 load();
-loadSituation();loadFleet();loadConfig();
-setInterval(()=>{if(!document.hidden){load();loadSituation();loadFleet();}},8000);
+if(on("situation"))loadSituation();
+if(on("fleet"))loadFleet();
+if(on("config"))loadConfig();
+setInterval(()=>{if(!document.hidden){load();
+  if(on("situation"))loadSituation();
+  if(on("fleet"))loadFleet();
+}},8000);
 </script></body></html>"""
 
 
@@ -792,13 +774,24 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if parsed.path == "/":
             if not self._authorized(qs):
-                body = LOGIN_PAGE.encode("utf-8")
-                self._send(200, body, "text/html; charset=utf-8")
+                self._send(200, LOGIN_PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 return
-            body = PAGE.replace("__DBPATH__", DB.path).encode("utf-8")
-            self._send(200, body, "text/html; charset=utf-8")
-        elif not self._authorized(qs):
+            self.send_response(302)
+            self.send_header("Location", "/situation")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        # 多页路由: /situation /live /fleet /config /metrics ... (产品形态: 一功能一页)
+        page = parsed.path.lstrip("/")
+        if page in SECTIONS:
+            if not self._authorized(qs):
+                self._send(401, b'{"error":"unauthorized"}', "application/json")
+                return
+            self._send(200, _render(page), "text/html; charset=utf-8")
+            return
+        if parsed.path.startswith("/api/") and not self._authorized(qs):
             self._send(401, b'{"error":"unauthorized"}', "application/json")
+            return
         elif parsed.path == "/api/me":
             s = self._session()
             self._send(200, json.dumps(
