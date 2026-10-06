@@ -1208,20 +1208,50 @@ if __name__ == "__main__":
     _shipper_on = _init_shipper()   # HONEYPOT_HIVE_URL 启用时外送事件到 hive
     from services.config_agent import init_from_env as _init_cfg_agent
     _cfg_agent_on = _init_cfg_agent(bait=auth_bait)   # 策略下发: hive 集中管控
+    _c2_task_holder = []
     parser = argparse.ArgumentParser(description="AI 渗透反制蜜罐 实验平台")
     parser.add_argument("--port", type=int, default=8080, help="HTTP 蜜罐端口")
     parser.add_argument("--server", action="store_true", help="直接启动 HTTP 蜜罐（不进入菜单）")
     args = parser.parse_args()
 
     if args.server:
+        if os.environ.get("HONEYPOT_C2_DISABLED", "") != "1":
+            async def _c2_server():
+                from c2_listener import C2Listener
+                from services.sensor_shipper import enqueue as _ship_ev
+
+                def _on_beacon(b):
+                    rec = {"source_ip": b.source_ip, "method": b.method,
+                           "path": b.path, "body": b.body[:500],
+                           "beacon_id": b.beacon_id, "ts": b.timestamp}
+                    _ship_ev("beacon", rec)
+                    if os.environ.get("HONEYPOT_DB"):
+                        try:
+                            from core.testdb import TestDB
+                            TestDB(os.environ["HONEYPOT_DB"]).record_beacon(rec)
+                        except Exception:
+                            pass
+
+                listener = C2Listener(
+                    port=int(os.environ.get("HONEYPOT_C2_PORT", "9999")),
+                    next_stage_payload=None, on_beacon=_on_beacon)
+                await listener.start()
+            _c2_task_holder.append(_c2_server)
         if _shipper_on:
             cprint(Color.GREEN, "[SHIPPER] 事件外送已启用 → "
                                + __import__("os").environ.get("HONEYPOT_HIVE_URL", ""))
         if _cfg_agent_on:
             cprint(Color.GREEN, "[CONFIG] 策略下发已启用 (60s 拉取)")
         cprint(Color.GREEN, f"[SERVER] 直接启动 HTTP 蜜罐端口 {args.port}")
+
+        async def _serve_all():
+            tasks = [asyncio.create_task(run_http_server(args.port))]
+            for coro in _c2_task_holder:
+                tasks.append(asyncio.create_task(coro()))
+            await asyncio.gather(*tasks)
+
         try:
-            asyncio.run(run_http_server(args.port))
+            asyncio.run(_serve_all())
         except KeyboardInterrupt:
             print("\n服务器已停止")
     else:

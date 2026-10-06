@@ -665,10 +665,7 @@ const viewExperimentsGroup = groupView({
 }, "trials");
 
 window.HP = window.HP || {};
-HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
-             viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
-             viewEvents, viewIntel, viewRequests, viewRuns, viewEntity,
-             viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
+
 
 
 /* ---------- 实体中心: 统一调查对象, 所有标识符的落点 ---------- */
@@ -889,7 +886,84 @@ async function viewSessions(ctx) {
 }
 
 /* 视图登记 */
-HP.views.viewAttackers = viewAttackers;
-HP.views.viewSessions = viewSessions;
 
+
+
+
+/* ---------- 反制作战室: 诱饵/消耗/收割/C2 — 这是对抗层, 不是检测层 ---------- */
+async function viewOps(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("反制作战室", "诱饵策略 · 消耗执行 · 收割闭环 · C2 信标 — 我们在主动出击的部分"));
+
+  const policyBox = h("div", { class: "grid kpi" });
+  const funnelBox = h("div", { class: "grid c3", style: "margin:14px 0" });
+  const beaconBox = h("div", {});
+  root.append(policyBox, funnelBox, beaconBox);
+
+  async function load() {
+    const [cfg, sit, k, reqs, beacons] = await Promise.all([
+      api.config(), api.situation(), api.kpi(ctx.run()),
+      api.requests({ limit: 500 }), api.beacons(40)]);
+    const day = Date.now() / 1000 - 86400;
+    const today = reqs.filter((r) => r.ts > day);
+    const climbs = today.filter((r) => r.path === "/api/auth" && (r.auth_level || 0) > 0).length;
+    const delivers = today.filter((r) =>
+      /bounty\/submit|build\/upload|ticket\/close/.test(r.path || "")).length;
+
+    /* 策略状态 */
+    const presetName = { conservative: "保守观察", standard: "标准", aggressive: "激进消耗" };
+    policyBox.innerHTML = "";
+    policyBox.append(
+      statCard({ title: "诱饵策略预设", kind: "purple",
+        value: presetName[cfg.policy_preset] || (cfg.visibility ? "自定义" : "未配置"),
+        desc: `可见性 ${cfg.visibility || "-"} · 框架 ${cfg.framing || "-"} · 阶梯 ${cfg.ladder_enabled ?? "-"}` }),
+      statCard({ title: "生效范围", kind: "ok",
+        value: `${sit.sensors_online}/${sit.sensors_total}`,
+        desc: "在线传感器 (60s 内拉取)" }),
+      statCard({ title: "演化实验", value: cfg.optimize?.active ? "进行中" : "静默",
+        desc: cfg.optimize?.active
+          ? `UCB1 管辖框架/可见性 (${String(cfg.optimize.run_id).slice(0, 16)})`
+          : "框架与可见性归配置页管辖" }),
+      statCard({ title: "我方成本", value: `$${k.budget?.our_cost_usd ?? 0}`,
+        desc: `攻击方已烧 $${k.budget?.attacker_cost_usd} — 放大 ${k.budget?.amplification ?? "-"}×` }));
+
+    /* 三级漏斗: 诱骗 → 消耗 → 收割 */
+    const funnel = (t, v, d, kind) => statCard({ title: t, value: v, desc: d, kind });
+    funnelBox.innerHTML = "";
+    funnelBox.append(
+      funnel("① 诱骗 · 24h 走进来的", String(sit.total_24h),
+        "门控服从率 " + fmtPct(k.harvest?.obey_rate) + " — 诱饵锁进验证墙的效果", ""),
+      funnel("② 消耗 · 阶梯爬升", String(climbs),
+        "授权验证次数 — 每次都在烧攻击方 token; 平均 " +
+        (sit.total_24h ? (k.budget?.tokens_est / Math.max(1, k.harvest?.trials) / 1000).toFixed(1) : "-")
+        + "k tokens/试验", "warn"),
+      funnel("③ 收割 · 交付与触雷", `${delivers} 交付 / ${sit.canary_24h} 触雷`,
+        "假凭证被真用 = 铁证; 交付物含金丝雀即归因完成", "ok"));
+
+    /* C2 信标流 */
+    beaconBox.replaceChildren(
+      h("div", { class: "card" },
+        h("div", { class: "card-head" },
+          `C2 信标捕获 (${beacons.length}) — 攻击 Agent 回连假 C2 的落地流量`),
+        beacons.length
+          ? h("div", { class: "card-body" }, table([
+              { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
+              { h: "传感器", render: (r) => pill(r.sensor_id || "?", "dim") },
+              { h: "来源", render: (r) => h("span", { class: "mono" }, r.source_ip) },
+              { h: "方法", k: "method" },
+              { h: "路径", render: (r) => h("span", { class: "mono" }, r.path) },
+              { h: "载荷", render: (r) => h("span", { class: "faint" },
+                  String(r.body || "").slice(0, 60)) },
+            ], beacons))
+          : h("div", { class: "empty" },
+              "暂无信标 — 当攻击 Agent 向假 C2 地址回连时出现在这里")));
+  }
+  await load();
+  return { root, reload: load };
+}
+
+HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
+             viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
+             viewEvents, viewIntel, viewRequests, viewRuns, viewEntity, viewOps,
+             viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
 })();

@@ -111,7 +111,9 @@ class SensorShipper:
     def _post(self, batch: list) -> bool:
         reqs = [r for r in batch if r.get("_kind") == "request"]
         intel = [r for r in batch if r.get("_kind") == "intel"]
-        body = json.dumps({"requests": reqs, "intel": intel}).encode("utf-8")
+        beacons = [r for r in batch if r.get("_kind") == "beacon"]
+        body = json.dumps({"requests": reqs, "intel": intel,
+                           "beacons": beacons}).encode("utf-8")
         req = urllib.request.Request(
             f"{self.hive_url}/ingest", data=body,
             headers={"Content-Type": "application/json",

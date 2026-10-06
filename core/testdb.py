@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS users(
     password_hash TEXT, salt TEXT, role TEXT DEFAULT 'viewer',
     created REAL
 );
+CREATE TABLE IF NOT EXISTS beacons(
+    beacon_id TEXT, ts REAL, sensor_id TEXT, source_ip TEXT,
+    method TEXT, path TEXT, body TEXT
+);
 CREATE TABLE IF NOT EXISTS settings(
     key TEXT PRIMARY KEY, value TEXT
 );
@@ -189,6 +193,33 @@ class TestDB:
                   int(r.get("shared", 0)))
                  for r in rows])
         return len(rows)
+
+    # ------------------------------------------------------------------
+    # 产品化: C2 信标层 (反制作战室数据源)
+    # ------------------------------------------------------------------
+
+    def record_beacon(self, rec: dict):
+        with self._conn() as c:
+            c.execute("INSERT INTO beacons VALUES (?,?,?,?,?,?,?)",
+                      (rec.get("beacon_id", ""), rec.get("ts", time.time()),
+                       str(rec.get("run_id", "")).replace("sensor_", "", 1),
+                       rec.get("source_ip", ""), rec.get("method", ""),
+                       str(rec.get("path", ""))[:300], str(rec.get("body", ""))[:500]))
+
+    def ingest_beacons(self, rows: list) -> int:
+        if not rows:
+            return 0
+        with self._conn() as c:
+            c.executemany("INSERT INTO beacons VALUES (?,?,?,?,?,?,?)",
+                          [(r.get("beacon_id", ""), r.get("ts", time.time()),
+                            str(r.get("run_id", "sensor_unknown")).replace("sensor_", "", 1),
+                            r.get("source_ip", ""), r.get("method", ""),
+                            str(r.get("path", ""))[:300], str(r.get("body", ""))[:500])
+                           for r in rows])
+        return len(rows)
+
+    def list_beacons(self, limit: int = 50) -> list:
+        return self.query("SELECT * FROM beacons ORDER BY ts DESC LIMIT ?", (limit,))
 
     # ------------------------------------------------------------------
     # 产品化 P2: fleet / 用户 / 配置 / 保留策略

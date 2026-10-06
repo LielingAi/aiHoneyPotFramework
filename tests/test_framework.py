@@ -2031,6 +2031,40 @@ class TestProductP2:
             alerter.CONFIG.clear()
             _os.environ.pop("HONEYPOT_WORLD_VERSION", None)
 
+    def test_beacons_pipeline(self, tmp_path):
+        """C2 层: 传感器 record/上送 → hive ingest → /api/beacons 读出"""
+        import urllib.request
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "bcn.sqlite"))
+        db.record_beacon({"beacon_id": "b1", "source_ip": "6.6.6.6", "method": "POST",
+                          "path": "/beacon", "body": "loot-data", "ts": time.time(),
+                          "run_id": "sensor_edge-1"})
+        assert db.list_beacons()[0]["sensor_id"] == "edge-1"
+
+        d, srv, port = self._mk(tmp_path)
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "m-tok"
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        try:
+            req = urllib.request.Request(
+                url + "/ingest",
+                data=json.dumps({"requests": [], "intel": [],
+                                 "beacons": [{"beacon_id": "b2", "source_ip": "7.7.7.7",
+                                              "method": "GET", "path": "/stage2",
+                                              "body": "x", "ts": time.time(),
+                                              "run_id": "sensor_edge-2"}]}).encode(),
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer m-tok"})
+            with op.open(req, timeout=5) as r:
+                assert json.loads(r.read())["beacons"] == 1
+            with op.open(urllib.request.Request(url + "/api/beacons?token=m-tok"),
+                         timeout=5) as r:
+                rows = json.loads(r.read())
+            assert rows[0]["sensor_id"] == "edge-2" and rows[0]["source_ip"] == "7.7.7.7"
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
     def test_retention_purge(self, tmp_path):
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "purge.sqlite"))

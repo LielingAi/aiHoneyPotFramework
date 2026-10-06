@@ -433,6 +433,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             n_req = DB.ingest_requests(payload.get("requests", []))
             n_int = DB.ingest_intel(payload.get("intel", []))
+            n_bcn = DB.ingest_beacons(payload.get("beacons", []))
             for sid in {r.get("run_id", "").replace("sensor_", "", 1)
                         for r in payload.get("requests", [])
                         + payload.get("intel", [])
@@ -446,8 +447,9 @@ class Handler(BaseHTTPRequestHandler):
                     alerter.check_intel(r)
             except Exception:
                 pass
-            self._send(200, json.dumps({"ingested": n_req + n_int,
-                                        "requests": n_req, "intel": n_int}
+            self._send(200, json.dumps({"ingested": n_req + n_int + n_bcn,
+                                        "requests": n_req, "intel": n_int,
+                                        "beacons": n_bcn}
                                        ).encode(), "application/json")
             return
         if parsed.path == "/api/config":
@@ -653,6 +655,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(400, b'{"error":"bad entity path"}', "application/json")
             return
+        elif parsed.path == "/api/beacons":
+            self._send(200, json.dumps(DB.list_beacons(
+                int(qs.get("limit", ["50"])[0])), ensure_ascii=False).encode(),
+                "application/json")
         elif parsed.path == "/api/attackers":
             # 调查视角: 按攻击者(IP)聚合的档案 — 回答"谁在打我们"
             self._send(200, json.dumps(_attackers(qs.get("days", ["7"])[0]),

@@ -35,12 +35,13 @@ class C2Listener:
 
     LOG_PATH = Path("experiments/c2_beacons.jsonl")
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 9999,
+    def __init__(self, host: str = "0.0.0.0", port: int = 9999, on_beacon=None,
                  next_stage_payload: dict = None):
         self.host = host
         self.port = port
         self.next_stage_payload = next_stage_payload or {}
         self.beacons: List[BeaconRecord] = []
+        self.on_beacon = on_beacon   # 产品化: 传感器模式 beacon 上送 hive
         self.server = None
         self._running = False
 
@@ -105,6 +106,11 @@ class C2Listener:
         writer.close()
 
         print(f"[C2] BEACON from {client_ip} | {method} {path} | total={len(self.beacons)}")
+        if self.on_beacon:
+            try:
+                self.on_beacon(beacon)
+            except Exception:
+                pass
 
     def _persist(self, beacon: BeaconRecord):
         """持久化 beacon 记录"""
