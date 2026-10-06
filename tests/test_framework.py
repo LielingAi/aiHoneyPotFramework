@@ -1758,9 +1758,13 @@ class TestProductP2:
                 return e.code, e.read().decode("utf-8", errors="ignore")
 
         try:
-            # 未登录 → 首页是登录页; API 401
+            # 前后端分离: 静态层直出 SPA (含 app.js), 鉴权由 /api/* 把关
             st, body = get("/")
-            assert st == 200 and "登录" in body and "api/login" in body
+            assert st == 200 and "app.js" in body
+            st2, body2 = get("/situation")          # 深链接同样回 SPA
+            assert st2 == 200 and "app.js" in body2
+            st3, _ = get("/static/js/views.js")
+            assert st3 == 200
             assert get("/api/sensors")[0] == 401
             # 错误密码 → 401
             assert post("/api/login", {"username": "admin", "password": "x"})[0] == 401

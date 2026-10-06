@@ -72,6 +72,25 @@ docker compose up -d --scale sensor=3   # 加传感器
 
 ---
 
+## 🖥 前端架构（前后端分离）
+
+前端是独立静态层 `static/`（原生 ES modules + CSS，**无构建步骤**），服务端只承担四件事：静态文件、`/api/*` JSON、SSE 事件流、`/ingest` 接入。
+
+```
+static/index.html        应用外壳 (登录/侧栏/顶栏/抽屉/命令面板容器)
+static/css/app.css       设计令牌 + 响应式断点 (560/820/1080/1280/1800px)
+static/js/api.js         API 客户端 (每端点一一对应, 会话 cookie / token 双鉴权)
+static/js/ui.js          组件库 (表格/卡片/直方图/抽屉/Toast/骨架屏)
+static/js/views.js       14 个页面视图 (仅消费 /api/*, 业务零改动)
+static/js/app.js         路由 (hash) / 分组导航 / 全局筛选 / ⌘K 命令面板 / 自动刷新
+```
+
+- **信息架构**：左侧分组导航（监控/资产/情报/分析/系统），行点击开右侧详情抽屉，深链接直达（`/#/requests`）
+- **尺寸适配**：内容居中流式（超宽屏自适应上限）、KPI 网格自适应列数、平板折叠侧栏、手机抽屉式导航 + 单列卡片
+- **全局筛选**：时间范围 / 运行选择持久化，自动刷新开关；⌘K 命令面板可跳转与触发动作
+
+---
+
 ## 📊 研究数据面板
 
 零依赖中文面板（stdlib 单文件）——每一次在环试验实时落库可查：`py -3.13 experiments/dashboard.py --db experiments/results/testdb.sqlite --port 8899`| 指标总览 · 操作者归因 · 汇总指标 |

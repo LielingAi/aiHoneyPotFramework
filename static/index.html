@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 蜜罐 · 控制台</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div id="app" class="app" hidden>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="brand-name">AI <b>蜜罐</b></span>
+    </div>
+    <nav class="side-nav" id="sidenav"></nav>
+    <div class="side-foot">
+      <div class="health" id="side-health">—</div>
+      <button class="collapse" id="btn-collapse" title="折叠导航">⟨</button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="menu-btn" id="btn-menu" title="菜单">☰</button>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="spacer"></div>
+      <button class="kbd-hint" id="btn-palette">搜索 / 跳转 <kbd>Ctrl K</kbd></button>
+      <label class="switch" id="live-toggle" title="自动刷新">
+        <input type="checkbox" id="chk-auto" checked><span class="slider"></span><span class="lbl">自动刷新</span>
+      </label>
+      <select id="filter-range" class="ctl" title="时间范围">
+        <option value="24h">24 小时</option>
+        <option value="7d">7 天</option>
+        <option value="all">全部</option>
+      </select>
+      <select id="filter-run" class="ctl"><option value="">全部运行</option></select>
+      <button class="ctl" id="btn-refresh" title="立即刷新">↻</button>
+      <button class="ctl primary" id="btn-stix">导出情报</button>
+      <div class="user" id="user-box">
+        <span class="avatar" id="user-avatar">?</span>
+        <span id="user-name" class="uname"></span>
+      </div>
+    </header>
+    <main class="content" id="content"></main>
+  </div>
+</div>
+
+<div id="login" class="login-wrap" hidden>
+  <form class="login-card" id="login-form">
+    <div class="login-brand"><span class="dot"></span> AI <b>蜜罐</b> 控制台</div>
+    <p class="muted">传感器网络 · 反制态势</p>
+    <label>用户名<input id="login-user" autocomplete="username" required></label>
+    <label>密码<input id="login-pass" type="password" autocomplete="current-password" required></label>
+    <button class="btn primary block" type="submit">登 录</button>
+    <div class="login-err" id="login-err"></div>
+  </form>
+</div>
+
+<div id="palette" class="palette" hidden>
+  <div class="palette-box">
+    <input id="palette-input" placeholder="跳转到… 或输入动作 (fleet / requests / stix)">
+    <div class="palette-list" id="palette-list"></div>
+  </div>
+</div>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-mask" id="drawer-mask"></div>
+  <div class="drawer-panel"><header id="drawer-head"></header><div id="drawer-body"></div></div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
