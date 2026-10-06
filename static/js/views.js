@@ -170,18 +170,29 @@ async function viewFleet(ctx) {
 /* ---------- 配置 ---------- */
 async function viewConfig() {
   const root = h("div", {});
-  root.append(pageHead("配置", "告警渠道与数据保留 · 环境变量优先级更高"));
-  const wrap = h("div", { class: "card pad", style: "max-width:640px" });
-  root.append(wrap);
+  root.append(pageHead("配置", "告警渠道 · 数据保留 · 账户"));
+
+  const alertCard = h("div", { class: "card pad", style: "max-width:680px" });
+  const userCard = h("div", { class: "card pad", style: "max-width:680px;margin-top:16px" });
+  root.append(alertCard, userCard);
 
   async function load() {
     const c = await api.config();
     const admin = c.role === "admin";
-    wrap.innerHTML = "";
-    if (!admin) wrap.append(h("div", { class: "banner warn" }, "只读账号 — 仅管理员可修改配置"));
+    alertCard.innerHTML = "";
+    userCard.innerHTML = "";
+
+    /* ---- 告警与保留 ---- */
+    if (!admin) alertCard.append(h("div", { class: "banner warn" }, "只读账号 — 仅管理员可修改"));
     const mk = (label, node) => h("div", { class: "cfgrow" }, h("label", {}, label), node);
-    const webhook = h("input", { type: "text", value: c.alert_webhook || "",
-      placeholder: "https://oapi.dingtalk.com/robot/send?access_token=…", disabled: !admin });
+    const hooks = h("textarea", { rows: "3", disabled: !admin,
+      style: "flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
+             + "color:var(--text);padding:9px 12px;font-size:12.5px;font-family:var(--mono);resize:vertical",
+      placeholder: "每行一个 webhook (钉钉/Slack/企微…)" });
+    let urls = [];
+    try { urls = JSON.parse(c.alert_webhooks || "[]"); } catch (_) {}
+    if (!urls.length && c.alert_webhook) urls = [c.alert_webhook];
+    hooks.value = urls.join("\n");
     const fmt = h("select", { disabled: !admin },
       h("option", { value: "generic" }, "generic (Slack / Discord)"),
       h("option", { value: "dingtalk" }, "钉钉"));
@@ -190,21 +201,73 @@ async function viewConfig() {
       value: c.alert_threshold || 8, disabled: !admin });
     const retention = h("input", { type: "number", min: "1",
       value: c.retention_days || 30, disabled: !admin });
-    wrap.append(
-      mk("告警 Webhook", webhook), mk("格式", fmt), mk("威胁阈值", threshold),
+    alertCard.append(
+      h("div", { class: "t muted" }, "告警渠道 (触发: 金丝雀触雷 / 铁证情报 / 威胁 ≥ 阈值)"),
+      mk("Webhook 列表", hooks), mk("格式", fmt), mk("威胁阈值", threshold),
       mk("数据保留 (天)", retention),
       h("div", { class: "toolbar", style: "margin-top:14px" },
         h("button", { class: "btn primary", disabled: !admin, onclick: async () => {
           try {
-            await api.saveConfig({ alert_webhook: webhook.value, alert_fmt: fmt.value,
-              alert_threshold: threshold.value, retention_days: retention.value });
-            toast("配置已保存");
+            const list = hooks.value.split("\n").map((x) => x.trim()).filter(Boolean);
+            await api.saveConfig({ alert_webhooks: JSON.stringify(list),
+              alert_fmt: fmt.value, alert_threshold: threshold.value,
+              retention_days: retention.value });
+            toast(`已保存 (${list.length} 个渠道)`);
           } catch (e) { toast("保存失败: " + e.message, "err"); } } }, "保存"),
         h("button", { class: "btn", disabled: !admin, onclick: async () => {
           try {
             const r = await api.testAlert();
-            toast(r.sent ? "测试告警已发送" : "未发送 (请检查 webhook)");
+            toast(r.sent ? "测试告警已发送 (至少一个渠道成功)" : "未发送 (请检查 webhook)");
           } catch (e) { toast("发送失败: " + e.message, "err"); } } }, "发送测试告警")));
+
+    /* ---- 账户管理 ---- */
+    userCard.append(h("div", { class: "t muted" }, "账户"));
+    if (!admin) {
+      userCard.append(h("div", { class: "empty" }, "账户管理仅管理员可见"));
+    } else {
+      let users = [];
+      try { users = await api.get("users"); } catch (_) {}
+      const tbl = table([
+        { h: "用户名", k: "username", render: (r) => h("span", { class: "mono" },
+            r.username + (r.self ? " (我)" : "")) },
+        { h: "角色", render: (r) => pill(r.role === "admin" ? "管理员" : "只读",
+            r.role === "admin" ? "info" : "dim") },
+        { h: "创建", render: (r) => relTime(r.created) },
+        { h: "操作", render: (r) => h("span", { style: "display:flex;gap:6px" },
+            h("button", { class: "btn", style: "padding:3px 9px;font-size:11.5px",
+              onclick: async (e) => {
+                e.stopPropagation();
+                const pw = window.prompt(`为 ${r.username} 设置新密码 (≥6位):`);
+                if (!pw) return;
+                try {
+                  await api.post("users", { action: "password", username: r.username, password: pw });
+                  toast("密码已更新");
+                } catch (err) { toast(err.message, "err"); } } }, "改密"),
+            (!r.self && (r.role !== "admin" || users.filter((u) => u.role === "admin").length > 1)) ?
+              h("button", { class: "btn", style: "padding:3px 9px;font-size:11.5px",
+                onclick: async (e) => {
+                  e.stopPropagation();
+                  try {
+                    await api.post("users", { action: "delete", username: r.username });
+                    toast("已删除"); load();
+                  } catch (err) { toast(err.message, "err"); } } }, "删除") : null) },
+      ], users);
+      const newU = h("input", { class: "search", placeholder: "新用户名", style: "min-width:130px;flex:0 1 160px" });
+      const newP = h("input", { type: "password", placeholder: "密码 (≥6位)",
+        style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
+               + "color:var(--text);padding:7px 12px;font-size:12.5px;min-width:130px" });
+      const newR = h("select", { class: "ctl" },
+        h("option", { value: "viewer" }, "只读"), h("option", { value: "admin" }, "管理员"));
+      userCard.append(tbl,
+        h("div", { class: "toolbar", style: "margin-top:12px" },
+          newU, newP, newR,
+          h("button", { class: "btn primary", onclick: async () => {
+            try {
+              await api.post("users", { action: "create", username: newU.value,
+                password: newP.value, role: newR.value });
+              toast("用户已创建"); load();
+            } catch (err) { toast(err.message, "err"); } } }, "添加用户")));
+    }
   }
   await load();
   return { root, reload: load };

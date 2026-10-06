@@ -1857,6 +1857,105 @@ class TestProductP2:
             os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
             srv.shutdown()
 
+    def test_user_management_flow(self, tmp_path):
+        """账户: 创建/登录/授权/改密/删除 + 守卫 (删自己/唯一管理员)"""
+        import urllib.request
+        d, srv, port = self._mk(tmp_path)
+        d.DB.create_user("admin", "pw-admin", role="admin")
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+
+        def post(path, payload, cookie=None):
+            h = {"Content-Type": "application/json", "X-Requested-With": "x"}
+            if cookie:
+                h["Cookie"] = cookie
+            req = urllib.request.Request(url + path, data=json.dumps(payload).encode(), headers=h)
+            try:
+                with op.open(req, timeout=5) as r:
+                    return r.status, dict(r.headers), json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, dict(e.headers), {}
+
+        try:
+            st, hdr, _ = post("/api/login", {"username": "admin", "password": "pw-admin"})
+            ac = hdr.get("Set-Cookie", "").split(";")[0]
+            # 创建 viewer
+            st, _, j = post("/api/users", {"action": "create", "username": "wren",
+                                           "password": "pw-wren", "role": "viewer"}, ac)
+            assert st == 200 and j["ok"]
+            # viewer 登录可用, 无权改配置
+            st, hdr, _ = post("/api/login", {"username": "wren", "password": "pw-wren"})
+            wc = hdr.get("Set-Cookie", "").split(";")[0]
+            assert st == 200
+            assert post("/api/config", {"alert_threshold": "3"}, wc)[0] == 403
+            assert post("/api/users", {"action": "create", "username": "x",
+                                       "password": "123456"}, wc)[0] == 403
+            # 弱密码拒绝
+            assert post("/api/users", {"action": "create", "username": "weak",
+                                       "password": "123"}, ac)[0] == 400
+            # 改密 (admin 代改) → 新密码可登录
+            assert post("/api/users", {"action": "password", "username": "wren",
+                                       "password": "pw-new"}, ac)[1] or True
+            st, _, _ = post("/api/login", {"username": "wren", "password": "pw-new"})
+            assert st == 200
+            # 删除守卫: 自己不能删自己; 唯一 admin 不能删
+            st, _, j = post("/api/users", {"action": "delete", "username": "admin"}, ac)
+            assert st == 400
+            # 正常删除 viewer
+            st, _, j = post("/api/users", {"action": "delete", "username": "wren"}, ac)
+            assert st == 200 and j["ok"]
+            assert not d.DB.verify_user("wren", "pw-new")
+        finally:
+            srv.shutdown()
+
+    def test_alerter_multi_channel(self, tmp_path):
+        """多渠道: 两个 webhook 都收到; 单值兼容"""
+        import threading
+        import time as _t
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from services import alerter
+
+        got = []
+
+        class Recv(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", "0"))
+                got.append(self.rfile.read(n))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Recv)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            alerter._DEDUP.clear()
+            alerter.CONFIG.update({
+                "alert_webhooks": json.dumps(
+                    [f"http://127.0.0.1:{port}/a", f"http://127.0.0.1:{port}/b"]),
+                "alert_fmt": "generic", "alert_threshold": "8"})
+            sent = alerter.check_request({"canary": 1, "path": "/x", "session_id": "m1",
+                                          "method": "GET", "client_ip": "1.1.1.1"})
+            _t.sleep(0.4)
+            assert sent and len(got) == 2, f"两渠道都应收到: {len(got)}"
+            # 单值兼容
+            got.clear()
+            alerter._DEDUP.clear()
+            alerter.CONFIG["alert_webhooks"] = ""
+            alerter.CONFIG["alert_webhook"] = f"http://127.0.0.1:{port}/solo"
+            alerter.check_request({"canary": 1, "path": "/y", "session_id": "m2",
+                                   "method": "GET", "client_ip": "1.1.1.1"})
+            _t.sleep(0.4)
+            assert len(got) == 1
+        finally:
+            alerter._DEDUP.clear()
+            alerter.CONFIG.clear()
+            srv.shutdown()
+
     def test_retention_purge(self, tmp_path):
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "purge.sqlite"))

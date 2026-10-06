@@ -64,6 +64,8 @@ const api = {
   events: (params) => get("events", { limit: 100, ...params }),
   intel: (params) => get("intel", { limit: 60, ...params }),
   requests: (params) => get("requests", { limit: 100, ...params }),
+  get,
+  post,
 };
 
 function stixUrl(run) { return `/api/export-stix${qs({ run })}`; }

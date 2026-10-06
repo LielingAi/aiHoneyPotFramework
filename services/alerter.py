@@ -34,8 +34,21 @@ def _cfg(env_name: str, key: str, default: str) -> str:
     return os.environ.get(env_name) or CONFIG.get(key) or default
 
 
-def _webhook() -> str:
-    return _cfg("HONEYPOT_ALERT_WEBHOOK", "alert_webhook", "")
+def _webhooks() -> list:
+    """多渠道: env 逗号分隔 > settings.alert_webhooks (JSON 列表) > settings.alert_webhook 单值"""
+    raw = os.environ.get("HONEYPOT_ALERT_WEBHOOK", "")
+    if raw:
+        return [u.strip() for u in raw.split(",") if u.strip()]
+    multi = CONFIG.get("alert_webhooks", "")
+    if multi:
+        try:
+            urls = json.loads(multi)
+            if isinstance(urls, list):
+                return [str(u).strip() for u in urls if str(u).strip()]
+        except json.JSONDecodeError:
+            pass
+    single = CONFIG.get("alert_webhook", "")
+    return [single] if single else []
 
 
 def _fmt() -> str:
@@ -74,8 +87,9 @@ def build_text(kind: str, record: dict) -> str:
 
 
 def maybe_alert(kind: str, record: dict) -> bool:
-    """评估并发送。返回是否发出 (去抖后仍失败也返回 False)。"""
-    if not _webhook():
+    """评估并逐渠道发送 (任一成功即 True)。去抖按 (kind, session, path) 全局生效。"""
+    urls = _webhooks()
+    if not urls:
         return False
     key = f"{kind}:{record.get('session_id','')}:{record.get('path', record.get('field',''))}"
     if not _deduped(key):
@@ -87,26 +101,30 @@ def maybe_alert(kind: str, record: dict) -> bool:
         payload = {"text": text, "kind": kind,
                    "ts": time.time(), "record": record}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        _webhook(), data=body,
-        headers={"Content-Type": "application/json"})
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(req, timeout=5) as r:
-            return r.status in (200, 204)
-    except Exception:
-        return False
+    sent_any = False
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for url in urls:
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with opener.open(req, timeout=5) as r:
+                if r.status in (200, 204):
+                    sent_any = True
+        except Exception:
+            continue
+    return sent_any
 
 
 def check_request(record: dict):
-    """requests 类记录: canary 触雷 或 高威胁 → 告警"""
+    """requests 类记录: canary 触雷 或 高威胁 → 告警 (返回是否发出)"""
     if record.get("canary"):
-        maybe_alert("canary", record)
+        return maybe_alert("canary", record)
     try:
         if float(record.get("threat", 0)) >= _threshold():
-            maybe_alert("threat", record)
+            return maybe_alert("threat", record)
     except (TypeError, ValueError):
         pass
+    return False
 
 
 def check_intel(record: dict):
@@ -115,4 +133,5 @@ def check_intel(record: dict):
 
 
 def status() -> dict:
-    return {"webhook": bool(_webhook()), "fmt": _fmt(), "threshold": _threshold()}
+    return {"webhook": bool(_webhooks()), "channels": len(_webhooks()),
+            "fmt": _fmt(), "threshold": _threshold()}

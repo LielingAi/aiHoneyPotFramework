@@ -248,6 +248,37 @@ class TestDB:
             return {"username": username, "role": u["role"]}
         return {}
 
+    def list_users(self) -> list:
+        return self.query("SELECT username, role, created FROM users ORDER BY created")
+
+    def delete_user(self, username: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute("DELETE FROM users WHERE username=?", (username,))
+            return cur.rowcount > 0
+
+    def set_user_role(self, username: str, role: str) -> bool:
+        if role not in ("admin", "viewer"):
+            return False
+        with self._conn() as c:
+            cur = c.execute("UPDATE users SET role=? WHERE username=?", (role, username))
+            return cur.rowcount > 0
+
+    def change_password(self, username: str, password: str) -> bool:
+        import hashlib
+        import secrets as _sec
+        rows = self.query("SELECT salt FROM users WHERE username=?", (username,))
+        if not rows:
+            return False
+        salt = _sec.token_hex(16)
+        h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
+        with self._conn() as c:
+            cur = c.execute("UPDATE users SET password_hash=?, salt=? WHERE username=?",
+                            (h, salt, username))
+            return cur.rowcount > 0
+
+    def count_admins(self) -> int:
+        return self.query("SELECT COUNT(*) AS n FROM users WHERE role='admin'")[0]["n"]
+
     def has_users(self) -> bool:
         return bool(self.query("SELECT 1 AS x FROM users LIMIT 1"))
 

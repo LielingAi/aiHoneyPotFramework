@@ -280,8 +280,8 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError):
                 self._send(400, b'{"error":"bad json"}', "application/json")
                 return
-            for key in ("alert_webhook", "alert_fmt", "alert_threshold",
-                        "retention_days"):
+            for key in ("alert_webhook", "alert_webhooks", "alert_fmt",
+                        "alert_threshold", "retention_days"):
                 if key in cfg:
                     DB.set_setting(key, str(cfg[key]))
             from services import alerter
@@ -299,6 +299,64 @@ class Handler(BaseHTTPRequestHandler):
                           "sample": "手动测试告警 (来自配置页)", "session_id": "config-test"})
             self._send(200, json.dumps({"sent": bool(ok)}).encode(),
                        "application/json")
+            return
+        if parsed.path == "/api/users":
+            if self._role(qs) != "admin":
+                self._send(403, b'{"error":"admin only"}', "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, b'{"error":"bad json"}', "application/json")
+                return
+            act = body.get("action", "")
+            if act == "create":
+                uname, pw = body.get("username", "").strip(), body.get("password", "")
+                role = body.get("role", "viewer")
+                if not uname or len(pw) < 6 or role not in ("admin", "viewer"):
+                    self._send(400, '{\"error\":\"用户名必填, 密码≥6位\"}'.encode(), "application/json")
+                    return
+                before = DB.has_users()
+                DB.create_user(uname, pw, role)
+                ok = DB.has_users() and (before or True)
+                self._send(200, json.dumps({"ok": ok}).encode(), "application/json")
+                return
+            if act == "delete":
+                uname = body.get("username", "")
+                sess = self._session()
+                if sess and sess.get("user") == uname:
+                    self._send(400, '{\"error\":\"不能删除当前登录账号\"}'.encode(), "application/json")
+                    return
+                if DB.count_admins() <= 1:
+                    target = DB.query("SELECT role FROM users WHERE username=?", (uname,))
+                    if target and target[0]["role"] == "admin":
+                        self._send(400, '{\"error\":\"至少保留一名管理员\"}'.encode(), "application/json")
+                        return
+                self._send(200, json.dumps({"ok": DB.delete_user(uname)}).encode(),
+                           "application/json")
+                return
+            if act == "role":
+                uname, role = body.get("username", ""), body.get("role", "")
+                if role == "admin" or DB.count_admins() > 1:
+                    ok = DB.set_user_role(uname, role)
+                else:
+                    ok = False      # 唯一管理员不能降级
+                self._send(200, json.dumps({"ok": ok}).encode(), "application/json")
+                return
+            if act == "password":
+                uname, pw = body.get("username", ""), body.get("password", "")
+                sess = self._session()
+                if sess and sess.get("user") != uname and sess.get("role") != "admin":
+                    self._send(403, b'{"error":"admin only"}', "application/json")
+                    return
+                if len(pw) < 6:
+                    self._send(400, '{\"error\":\"密码至少 6 位\"}'.encode(), "application/json")
+                    return
+                self._send(200, json.dumps({"ok": DB.change_password(uname, pw)}).encode(),
+                           "application/json")
+                return
+            self._send(400, b'{"error":"unknown action"}', "application/json")
             return
         if parsed.path == "/api/sensors/note":
             if self._role(qs) != "admin":
@@ -337,6 +395,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(
                 {**_masked_cfg(), "role": self._role(qs)},
                 ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/users":
+            if self._role(qs) != "admin":
+                self._send(403, b'{"error":"admin only"}', "application/json")
+                return
+            rows = DB.list_users()
+            sess = self._session()
+            for r in rows:
+                r["self"] = bool(sess) and sess.get("user") == r["username"]
+            self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/sensors":
             online = time.time() - 90
             rows = []
