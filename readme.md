@@ -50,11 +50,27 @@
 
 ---
 
+## 🚀 产品化部署（传感器网络拓扑)
+
+实验态之上的一层：N 个**传感器**（蜜罐+外送器，本地不留态）→ 一个 **hive**（控制台+ingest，SQLite 汇聚）。
+
+```bash
+export HONEYPOT_CONSOLE_TOKEN=$(openssl rand -hex 16)
+docker compose up -d                 # sensor + hive
+docker compose up -d --scale sensor=3   # 加传感器
+# 控制台: http://<hive>:8899/?token=$HONEYPOT_CONSOLE_TOKEN
+```
+
+- **传感器外送** `services/sensor_shipper.py`：事件批量送 hive（2s/50 条 flush），断网落 spool 恢复后补发；蜜罐热路径仅一次 queue.put
+- **hive 接入**：`POST /ingest`（Bearer 鉴权，批量写同一 schema，sensor_id 入 run_id 列区分来源，原始时间戳保留）
+- **控制台鉴权**：`HONEYPOT_CONSOLE_TOKEN` 未设=开放（兼容实验态），设了则全部端点要求 `?token=` 或 Bearer
+- compose 之外也可纯进程组网：蜜罐侧 `HONEYPOT_HIVE_URL=http://hive:8899` 即可，零容器依赖
+
+---
+
 ## 📊 研究数据面板
 
-零依赖中文面板（stdlib 单文件）——每一次在环试验实时落库可查：`py -3.13 experiments/dashboard.py --db experiments/results/testdb.sqlite --port 8899`
-
-| 指标总览 · 操作者归因 · 汇总指标 |
+零依赖中文面板（stdlib 单文件）——每一次在环试验实时落库可查：`py -3.13 experiments/dashboard.py --db experiments/results/testdb.sqlite --port 8899`| 指标总览 · 操作者归因 · 汇总指标 |
 |---|
 | ![指标总览与操作者归因](docs/images/dashboard-metrics.png) |
 

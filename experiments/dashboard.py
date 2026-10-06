@@ -177,9 +177,13 @@ td.num,th.num{font-family:var(--mono);text-align:right}
 
 <script>
 const g=(id)=>document.getElementById(id);
+const TOKEN=new URLSearchParams(location.search).get('token')||'';
 let CACHE={};   // 供客户端搜索复用的最近数据
 async function api(name,qs=""){
-  try{const r=await fetch("/api/"+name+qs);return await r.json();}
+  try{
+    const sep=(qs||TOKEN)?((qs && qs.includes("?"))?"&":"?"):"";
+    const tk=TOKEN?`${sep}token=${encodeURIComponent(TOKEN)}`:"";
+    const r=await fetch("/api/"+name+qs+tk);return await r.json();}
   catch(e){toast("接口 "+name+" 加载失败: "+e.message);return[];}
 }
 function toast(msg){const t=g("toast");t.textContent=msg;t.style.display="block";
@@ -197,7 +201,9 @@ function reltime(ts){if(!ts)return"";const s=Math.max(0,Date.now()/1000-ts);
   if(s<60)return s.toFixed(0)+"秒前";if(s<3600)return (s/60).toFixed(0)+"分钟前";
   if(s<86400)return (s/3600).toFixed(1)+"小时前";return (s/86400).toFixed(1)+"天前";}
 function dl_stix(){const run=g("runsel").value;
-  window.open("/api/export-stix"+(run?`?run=${run}`:""),"_blank");}
+  const p=new URLSearchParams(); if(run)p.set("run",run); if(TOKEN)p.set("token",TOKEN);
+  const qs=p.toString();
+  window.open("/api/export-stix"+(qs?"?"+qs:""),"_blank");}
 
 /* 情报分级 → [样式类, 中文名] */
 const GRADE={consistent:["ok","铁证"],canary:["ok","金丝雀复用"],
@@ -352,6 +358,17 @@ load();setInterval(()=>{if(!document.hidden)load();},8000);
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _authorized(self, qs: dict) -> bool:
+        """产品化 token 鉴权: HONEYPOT_CONSOLE_TOKEN 未设 = 开放 (兼容实验态);
+        设了则 / 与 /api/* 与 /ingest 全部要求 ?token= 或 Bearer 匹配"""
+        token = os.environ.get("HONEYPOT_CONSOLE_TOKEN", "")
+        if not token:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {token}":
+            return True
+        return qs.get("token", [""])[0] == token
+
     def _send(self, code: int, body: bytes, ctype: str, extra=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -364,9 +381,33 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):       # 安静访问日志
         pass
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        if parsed.path == "/ingest":
+            if not self._authorized(qs):
+                self._send(401, b'{"error":"unauthorized"}', "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, b'{"error":"bad json"}', "application/json")
+                return
+            n_req = DB.ingest_requests(payload.get("requests", []))
+            n_int = DB.ingest_intel(payload.get("intel", []))
+            self._send(200, json.dumps({"ingested": n_req + n_int,
+                                        "requests": n_req, "intel": n_int}
+                                       ).encode(), "application/json")
+            return
+        self._send(404, b"not found", "text/plain")
+
     def do_GET(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
+        if not self._authorized(qs):
+            self._send(401, b'{"error":"unauthorized"}', "application/json")
+            return
         run = qs.get("run", [None])[0]
         run_cond, params = ("WHERE run_id = ?", (run,)) if run else ("", ())
         if parsed.path == "/":

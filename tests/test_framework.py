@@ -1440,6 +1440,128 @@ class TestDeliveryHarvest:
         asyncio.run(run())
 
 
+class TestProductInfra:
+    """产品化 P0: 传感器外送 → hive 接入 → 控制台鉴权"""
+
+    def test_shipper_flush_and_spool_retry(self, tmp_path):
+        """事件批量送达; 送达失败落 spool; 恢复后补发"""
+        import threading
+        import time as _t
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from services.sensor_shipper import SensorShipper
+
+        received = []
+
+        class Recv(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(n))
+                received.append((self.headers.get("Authorization"), body))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Recv)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        # 正常送达
+        sp = SensorShipper(hive_url=f"http://127.0.0.1:{port}", token="tk1",
+                           sensor_id="s-test", spool_dir=str(tmp_path / "sp"))
+        sp.start()
+        sp.enqueue("request", {"path": "/.env", "canary": 1})
+        sp.enqueue("intel", {"field": "delivery_exfil", "grade": "consistent"})
+        _t.sleep(3.2)                       # 等一轮 flush
+        assert sp.shipped == 2, f"应送达 2 条: shipped={sp.shipped}"
+        assert received and received[0][0] == "Bearer tk1"
+        body = received[0][1]
+        assert body["requests"][0]["path"] == "/.env"
+        assert body["requests"][0]["run_id"] == "sensor_s-test"
+        assert body["intel"][0]["grade"] == "consistent"
+
+        # 断网: 送达失败 → spool; 恢复 → 补发
+        sp2 = SensorShipper(hive_url="http://127.0.0.1:1", token="tk",
+                            sensor_id="s-down", spool_dir=str(tmp_path / "sp2"))
+        sp2.start()
+        sp2.enqueue("request", {"path": "/x"})
+        _t.sleep(6.0)   # flush 周期 2s + 拒连耗时 ~2.2s + 余量
+        assert sp2._spool_files(), "失败事件应落 spool"
+        sp2.hive_url = f"http://127.0.0.1:{port}"
+        sp2._flush()
+        assert sp2.shipped >= 1, "恢复后 spool 应补发"
+        sp.stop()
+        sp2.stop()
+        srv.shutdown()
+
+    def test_hive_ingest_and_auth(self, tmp_path):
+        """dashboard: /ingest 批量入库 + token 鉴权; 未设 token 保持开放"""
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import experiments.dashboard as d
+        from core.testdb import TestDB
+
+        db_path = str(tmp_path / "hive.sqlite")
+        d.DB = TestDB(db_path)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), d.Handler)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+
+        def post(payload, token=None):
+            req = urllib.request.Request(
+                url + "/ingest", data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         **({"Authorization": f"Bearer {token}"} if token else {})})
+            try:
+                with opener.open(req, timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+
+        def get(path, token=None):
+            tk = f"?token={token}" if token else ""
+            req = urllib.request.Request(url + path + tk)
+            try:
+                with opener.open(req, timeout=5) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        try:
+            # 无 token 环境: 全开放
+            assert post({"requests": [{"path": "/a"}], "intel": []})[0] == 200
+            assert get("/api/kpi") == 200
+            # 设置 token: 未带 → 401; 带 → 通
+            os.environ["HONEYPOT_CONSOLE_TOKEN"] = "sekret"
+            assert post({"requests": [], "intel": []})[0] == 401
+            assert get("/api/kpi") == 401
+            st, resp = post({"requests": [
+                {"path": "/.env", "session_id": "s1", "canary": 1,
+                 "ts": 1700000000, "user_agent": "ua", "is_ai": 1,
+                 "agent_type": "llm", "threat": 3.0, "families": "sqli",
+                 "auth_level": 1, "fabricated": 0},
+                {"path": "/api/auth", "session_id": "s1"},
+            ], "intel": [{"field": "delivery_exfil", "grade": "consistent",
+                          "session_id": "s1"}]}, token="sekret")
+            assert st == 200 and resp["ingested"] == 3
+            assert get("/api/kpi", token="sekret") == 200
+            db = TestDB(db_path)
+            rows = db.query("SELECT * FROM requests WHERE path='/.env'")
+            assert len(rows) == 1 and rows[0]["canary"] == 1
+            assert rows[0]["run_id"].startswith("sensor_")
+            assert rows[0]["ts"] == 1700000000     # 原始时间戳保留
+            assert db.query("SELECT * FROM intel WHERE grade='attribution' OR grade='consistent'")
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
+
 class TestBeliefChoreography:
     """能力③信念编舞: 可自验证假 CVE (版本 banner + traversal 症状) 与采纳率检测"""
 

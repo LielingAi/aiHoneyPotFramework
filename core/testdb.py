@@ -139,6 +139,43 @@ class TestDB:
         with self._conn() as c:
             return [dict(r) for r in c.execute(sql, params)]
 
+    # ------------------------------------------------------------------
+    # 产品化: hive 批量入库 (传感器外送数据的落盘口, schema 不变)
+    # ------------------------------------------------------------------
+
+    def ingest_requests(self, rows: list) -> int:
+        """rows: dict 列表, 键对应 requests 列 (sensor_id 存入 run_id 列以区分来源)"""
+        if not rows:
+            return 0
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO requests(run_id, ts, session_id, client_ip, method,"
+                " path, query, user_agent, is_ai, agent_type, threat, families,"
+                " auth_level, fabricated, canary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(r.get("run_id", "sensor_unknown"), r.get("ts", time.time()),
+                  r.get("session_id", ""), r.get("client_ip", ""),
+                  r.get("method", ""), r.get("path", ""), str(r.get("query", ""))[:500],
+                  str(r.get("user_agent", ""))[:200], int(r.get("is_ai", 0)),
+                  r.get("agent_type", ""), float(r.get("threat", 0)),
+                  str(r.get("families", ""))[:200], int(r.get("auth_level", 0)),
+                  int(r.get("fabricated", 0)), int(r.get("canary", 0)))
+                 for r in rows])
+        return len(rows)
+
+    def ingest_intel(self, rows: list) -> int:
+        if not rows:
+            return 0
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO intel(run_id, ts, session_id, field, grade, hash_key,"
+                " sample, shared) VALUES (?,?,?,?,?,?,?,?)",
+                [(r.get("run_id", "sensor_unknown"), r.get("ts", time.time()),
+                  r.get("session_id", ""), r.get("field", ""), r.get("grade", ""),
+                  str(r.get("hash_key", ""))[:32], str(r.get("sample", ""))[:200],
+                  int(r.get("shared", 0)))
+                 for r in rows])
+        return len(rows)
+
     def summary(self, run_id: str = None) -> list:
         cond = "WHERE run_id = ?" if run_id else ""
         params = (run_id,) if run_id else ()

@@ -1,0 +1,43 @@
+# 产品化拓扑: 传感器 (蜜罐+外送器) × N + hive (控制台+ingest) × 1
+#
+# 用法:
+#   export HONEYPOT_CONSOLE_TOKEN=$(openssl rand -hex 16)
+#   docker compose up -d
+#   # 控制台: http://<hive>:8899/?token=$HONEYPOT_CONSOLE_TOKEN
+#   # 加传感器: docker compose up -d --scale sensor=3
+#
+# 传感器只外送事件 (requests/intel), 本地不保留数据库;
+# hive 收全部传感器数据, SQLite 落盘于命名卷。
+
+services:
+  sensor:
+    build: .
+    command: python main.py --server --port 8080
+    environment:
+      HONEYPOT_HIVE_URL: http://hive:8899
+      HONEYPOT_HIVE_TOKEN: ${HONEYPOT_CONSOLE_TOKEN:?set HONEYPOT_CONSOLE_TOKEN}
+      HONEYPOT_SENSOR_ID: ${SENSOR_ID:-sensor-1}
+      HONEYPOT_SPOOL_DIR: /spool
+      HONEYPOT_DB: ""            # 传感器本地不落库, 纯外送
+    volumes:
+      - spool:/spool
+    ports:
+      - "8080-8089:8080"         # 多传感器时端口区间映射, 对外可再前置反代
+      - "5432:5432"              # 假 PostgreSQL
+      - "6379:6379"              # 迷你 Redis
+    restart: unless-stopped
+
+  hive:
+    build: .
+    command: python experiments/dashboard.py --db /data/hive.sqlite --port 8899
+    environment:
+      HONEYPOT_CONSOLE_TOKEN: ${HONEYPOT_CONSOLE_TOKEN:?set HONEYPOT_CONSOLE_TOKEN}
+    volumes:
+      - hive-data:/data
+    ports:
+      - "8899:8899"
+    restart: unless-stopped
+
+volumes:
+  spool:
+  hive-data:

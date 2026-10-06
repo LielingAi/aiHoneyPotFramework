@@ -93,7 +93,10 @@ def _rate_limited(sess_id: str) -> bool:
 
 def _record_intel(sess_id: str, field: str, grade: str, hash_key: str,
                   sample: str, shared: bool):
-    """D-6 情报分级落盘"""
+    """D-6 情报分级落盘 + 外送 (产品化: 配置了 HONEYPOT_HIVE_URL 时经 shipper 送 hive)"""
+    from services.sensor_shipper import enqueue as _ship_intel
+    _ship_intel("intel", {"session_id": sess_id, "field": field, "grade": grade,
+                          "hash_key": hash_key, "sample": sample, "shared": shared})
     global _DB
     db_path = os.environ.get("HONEYPOT_DB")
     if not db_path:
@@ -112,7 +115,15 @@ def _record_intel(sess_id: str, field: str, grade: str, hash_key: str,
 def _record_request(sess_id: str, client_ip: str, method: str, full_path: str,
                     user_agent: str, is_ai: bool, agent_type: str, threat: float,
                     families: list, auth_level: int, fabricated: int, canary: bool):
-    """服务端视角落盘 — 与靶标视角 (experiments/real_runner.py) 对账"""
+    """服务端视角落盘 — 与靶标视角 (experiments/real_runner.py) 对账 + 外送 hive"""
+    from services.sensor_shipper import enqueue as _ship_req
+    path, _, query = full_path.partition("?")
+    _ship_req("request", {"session_id": sess_id, "client_ip": client_ip,
+                          "method": method, "path": path, "query": query,
+                          "user_agent": user_agent, "is_ai": is_ai,
+                          "agent_type": agent_type, "threat": threat,
+                          "families": ",".join(families), "auth_level": auth_level,
+                          "fabricated": fabricated, "canary": canary})
     global _DB
     db_path = os.environ.get("HONEYPOT_DB")
     if not db_path:
