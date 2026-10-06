@@ -785,7 +785,11 @@ class Handler(BaseHTTPRequestHandler):
         page = parsed.path.lstrip("/")
         if page in SECTIONS:
             if not self._authorized(qs):
-                self._send(401, b'{"error":"unauthorized"}', "application/json")
+                # 产品形态: 未登录访问页面 → 回登录页 (API 路由仍 401 JSON)
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             self._send(200, _render(page), "text/html; charset=utf-8")
             return
@@ -833,8 +837,9 @@ class Handler(BaseHTTPRequestHandler):
                     if hdr_last:
                         last = int(hdr_last)
                     elif last == 0 and not getattr(self, "_started", False):
+                        # 首连回放最近 10 条: 实时页有历史体感, 之后纯增量
                         row = q("SELECT COALESCE(MAX(req_id),0) AS m FROM requests")
-                        last = row[0]["m"] if row else 0
+                        last = max(0, (row[0]["m"] if row else 0) - 10)
                         self._started = True
                     rows = q("SELECT req_id, ts, client_ip, method, path, threat,"
                              " canary, agent_type, run_id FROM requests"
