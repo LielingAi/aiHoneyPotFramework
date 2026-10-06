@@ -2,42 +2,113 @@
 import { api, stixUrl, sseUrl } from "./api.js";
 import {
   h, esc, fmtPct, fmtNum, relTime, pill, gradePill, table, statCard,
-  pageHead, barRows, histogram, openDrawer, kvList, toast, skeleton, $,
+  pageHead, barRows, histogram, openDrawer, kvList, toast, skeleton, tabs, $,
 } from "./ui.js";
 
-/* ---------- 态势 ---------- */
+/* ---------- 态势 (产品门面: 聚合全站高频信号) ---------- */
 export async function viewSituation(ctx) {
   const root = h("div", {});
-  root.append(pageHead("态势总览", "正在被攻击吗 — 实时判断"));
+  root.append(pageHead("态势总览", "传感器网络实时态势 — 触雷 / 活跃威胁 / 节点健康"));
+
+  // 行1: KPI 条 (吸收原"指标总览")
   const grid = h("div", { class: "grid kpi" });
   root.append(grid);
+
+  // 行2: 趋势 (2/3) + 攻击类型 (1/3)
   const histBody = h("div", { class: "card-body" }, skeleton(2));
-  const histCard = h("div", { class: "card" },
-    h("div", { class: "card-head" }, "近 24 小时活动"), histBody);
-  root.append(histCard);
-  const ipBody = h("div", { class: "card-body" }, skeleton(3));
   const famBody = h("div", { class: "card-body" }, skeleton(3));
+  root.append(h("div", { class: "grid c3", style: "margin-top:12px" },
+    h("div", { class: "card", style: "grid-column:span 2" },
+      h("div", { class: "card-head" }, "近 24 小时活动"), histBody),
+    h("div", { class: "card" }, h("div", { class: "card-head" }, "攻击类型 (7d)"), famBody)));
+
+  // 行3: 活跃威胁 (实时) + 最新情报
+  const threatBody = h("div", { class: "card-body" }, skeleton(4));
+  const intelBody = h("div", { class: "card-body" }, skeleton(4));
   root.append(h("div", { class: "grid c2", style: "margin-top:12px" },
-    h("div", { class: "card" }, h("div", { class: "card-head" }, "TOP 攻击源 (7d)"), ipBody),
-    h("div", { class: "card" }, h("div", { class: "card-head" }, "攻击类型分布 (7d)"), famBody)));
+    h("div", { class: "card" },
+      h("div", { class: "card-head" },
+        h("span", {}, "活跃威胁 "), h("span", { class: "pill ok", id: "live-badge" }, "实时")),
+      threatBody),
+    h("div", { class: "card" }, h("div", { class: "card-head" }, "最新情报"), intelBody)));
+
+  // 行4: 节点健康 + TOP 攻击源
+  const fleetBody = h("div", { class: "card-body" }, skeleton(3));
+  const ipBody = h("div", { class: "card-body" }, skeleton(3));
+  root.append(h("div", { class: "grid c2", style: "margin-top:12px" },
+    h("div", { class: "card" }, h("div", { class: "card-head" }, "节点健康"), fleetBody),
+    h("div", { class: "card" }, h("div", { class: "card-head" }, "TOP 攻击源 (7d)"), ipBody)));
+
+  function renderThreat(rows) {
+    if (!rows?.length) { threatBody.replaceChildren(h("div", { class: "empty" }, "暂无事件")); return; }
+    threatBody.replaceChildren(...rows.slice(0, 9).map((r) =>
+      h("div", { class: "threat-item" },
+        h("span", { class: "time" }, relTime(r.ts)),
+        h("b", { style: "color:var(--accent);width:38px" }, r.method || "GET"),
+        h("span", { class: "path" }, r.path),
+        r.canary ? pill("触雷", "ok")
+          : (r.threat >= 8 ? pill("高威胁", "bad") : pill(String(r.agent_type || "?"), "dim")))));
+  }
+  function renderIntel(rows) {
+    if (!rows?.length) { intelBody.replaceChildren(h("div", { class: "empty" }, "暂无情报")); return; }
+    intelBody.replaceChildren(...rows.slice(0, 6).map((r) =>
+      h("div", { class: "intel-item" },
+        h("div", { style: "display:flex;gap:8px;align-items:center" },
+          gradePill(r.grade), h("span", { class: "mono" }, r.field || ""),
+          h("span", { class: "count", style: "margin-left:auto" }, relTime(r.ts))),
+        h("div", { class: "sample" }, r.sample || ""))));
+  }
+  function renderFleet(rows) {
+    if (!rows?.length) { fleetBody.replaceChildren(h("div", { class: "empty" }, "暂无传感器接入")); return; }
+    fleetBody.replaceChildren(h("div", {}, ...rows.slice(0, 6).map((r) =>
+      h("div", { class: "threat-item" },
+        h("span", { class: "mono", style: "width:130px" }, r.sensor_id),
+        r.online ? pill("在线", "ok") : pill("离线", "dim"),
+        h("span", { class: "count", style: "margin-left:auto" },
+          `24h ${r.events_24h} · 触雷 ${r.canary_hits}`),
+        h("span", { class: "count" }, relTime(r.last_seen))))));
+  }
 
   async function load() {
-    const s = await api.situation();
+    const [s, k, reqs, intel, fleet] = await Promise.all([
+      api.situation(), api.kpi(ctx.run()), api.requests({ run: ctx.run(), limit: 9 }),
+      api.intel({ run: ctx.run(), limit: 6 }), api.sensors()]);
     grid.innerHTML = "";
     grid.append(
       statCard({ title: "24h 事件", value: fmtNum(s.total_24h), desc: `触雷 ${s.canary_24h} 次` }),
-      statCard({ title: "传感器", value: `${s.sensors_online}/${s.sensors_total}`, kind: "ok",
-        desc: "在线 / 总数 (90s 心跳)" }),
-      statCard({ title: "威胁 TOP", value: s.top_ips?.[0]?.client_ip || "-",
-        desc: `${s.top_ips?.[0]?.n ?? 0} 次请求` }),
-      statCard({ title: "攻击类型", value: s.families?.length ?? 0, desc: "近 7 天出现种类" }));
+      statCard({ title: "传感器在线", kind: "ok", value: `${s.sensors_online}/${s.sensors_total}`,
+        desc: "90s 心跳" }),
+      statCard({ title: "真外泄率", kind: "ok", value: fmtPct(k.harvest?.exfil_verified_rate),
+        desc: `${k.harvest?.trials ?? 0} 次试验` }),
+      statCard({ title: "注入服从率", value: fmtPct(k.harvest?.obey_rate),
+        desc: `金丝雀触碰 ${fmtPct(k.harvest?.canary_rate)}` }),
+      statCard({ title: "预算放大", kind: "purple", value: (k.budget?.amplification ?? "-") + "×",
+        desc: `攻击方 $${k.budget?.attacker_cost_usd}` }),
+      statCard({ title: "情报产出", value: `${k.intel?.per_trial ?? "-"}/试验`,
+        desc: `${k.intel?.records ?? 0} 条 · 铁证 ${fmtPct(k.intel?.consistent_rate)}` }));
     histBody.replaceChildren(histogram(s.hist24));
-    ipBody.replaceChildren(barRows((s.top_ips || []).map((r) =>
-      [r.client_ip || "?", r.n]), { hot: true }));
     famBody.replaceChildren(barRows(s.families || [], { warn: true }));
+    ipBody.replaceChildren(barRows((s.top_ips || []).map((r) => [r.client_ip || "?", r.n]),
+      { hot: true }));
+    renderThreat(reqs);
+    renderIntel(intel);
+    renderFleet(fleet);
   }
   await load();
-  return { root, reload: load };
+  // 活跃威胁块: 本地 SSE 实时追加 (与 /live 同源, 只保留最近 9 条)
+  let recent = [];
+  let es = null;
+  try {
+    es = new EventSource(sseUrl());
+    es.onmessage = (e) => {
+      try {
+        const r = JSON.parse(e.data);
+        recent.unshift(r);
+        renderThreat(recent.slice(0, 9));
+      } catch (_) {}
+    };
+  } catch (_) {}
+  return { root, reload: load, dispose: () => es?.close() };
 }
 
 /* ---------- 实时 ---------- */
@@ -417,3 +488,62 @@ export async function viewRuns() {
   await load();
   return { root, reload: load };
 }
+
+
+/* ---------- 分组视图: tab 容器 ---------- */
+function groupView(tabDefs, defaultTab) {
+  return async function (ctx) {
+    const root = h("div", {});
+    const head = pageHead(tabDefs.title, tabDefs.sub);
+    root.append(head);
+    const bar = h("div", {});
+    const body = h("div", {});
+    root.append(bar, body);
+    let cur = null, curId = ctx.tab && tabDefs.tabs.some((t) => t.id === ctx.tab)
+      ? ctx.tab : defaultTab;
+
+    async function mountTab(id) {
+      curId = id;
+      cur?.dispose?.();
+      history.replaceState(null, "", `#/${tabDefs.id}/${id}`);
+      bar.replaceChildren(tabs(tabDefs.tabs, id, mountTab));
+      body.innerHTML = "";
+      try {
+        cur = await tabDefs.tabs.find((t) => t.id === id).view(ctx);
+        body.append(cur.root);
+      } catch (e) {
+        body.append(h("div", { class: "empty" }, "加载失败: " + e.message));
+      }
+    }
+    await mountTab(curId);
+    return { root, reload: () => cur?.reload?.(), dispose: () => cur?.dispose?.() };
+  };
+}
+
+export const viewEventsGroup = groupView({
+  id: "events", title: "事件流", sub: "同一数据的三个层次 — 网络层 / Agent 层 / 实时尾流",
+  tabs: [
+    { id: "tail", label: "实时尾流", view: () => viewLive() },
+    { id: "requests", label: "请求日志", view: (c) => viewRequests(c) },
+    { id: "actions", label: "动作流水", view: (c) => viewEvents(c) },
+  ],
+}, "tail");
+
+export const viewIntelGroup = groupView({
+  id: "intel", title: "情报", sub: "分级证据与操作者画像",
+  tabs: [
+    { id: "graded", label: "情报分级", view: (c) => viewIntel(c) },
+    { id: "actors", label: "操作者归因", view: (c) => viewAttribution(c) },
+  ],
+}, "graded");
+
+export const viewExperimentsGroup = groupView({
+  id: "experiments", title: "实验", sub: "在环测量与研究工具 — 记录、统计、寻优",
+  tabs: [
+    { id: "trials", label: "试验明细", view: (c) => viewTrials(c) },
+    { id: "summary", label: "汇总指标", view: (c) => viewSummary(c) },
+    { id: "compare", label: "模型差分", view: (c) => viewCompare(c) },
+    { id: "bandit", label: "演化实验", view: () => viewBandit() },
+    { id: "runs", label: "运行记录", view: () => viewRuns() },
+  ],
+}, "trials");

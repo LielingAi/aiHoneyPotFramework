@@ -43,7 +43,10 @@ const GRADE = {
   shared_forgery_confirmed: ["bad", "造假·已证实"],
   attribution: ["purple", "操作者指纹"], weak: ["warn", "弱证据"],
 };
-export const gradePill = (g) => pill(...(GRADE[g] || ["warn", g]));
+export const gradePill = (g) => {
+  const [kind, label] = GRADE[g] || ["warn", g];
+  return pill(label, kind);
+};
 
 /* ---------- 表格: 列定义 {h, k, num, w, render(row)} ---------- */
 export function table(cols, rows, { onRow, empty = "暂无数据" } = {}) {
@@ -121,6 +124,15 @@ export function toast(msg, kind = "") {
   const t = h("div", { class: `toast ${kind}` }, msg);
   box.append(t);
   setTimeout(() => t.remove(), 4200);
+}
+
+/* ---------- 标签页 ---------- */
+export function tabs(defs, activeId, onSelect) {
+  return h("div", { class: "tabs" }, ...defs.map((d) =>
+    h("button", {
+      class: "tab" + (d.id === activeId ? " active" : ""),
+      onclick: () => onSelect(d.id),
+    }, d.label)));
 }
 
 /* ---------- 骨架 ---------- */

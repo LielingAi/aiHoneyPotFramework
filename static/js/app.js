@@ -8,30 +8,27 @@ import * as views from "./views.js";
 /* ---------- 信息架构: 分组导航 ---------- */
 const NAV = [
   { group: "监控", items: [
-    { id: "situation", label: "态势总览", icon: "◉", view: "viewSituation" },
-    { id: "live", label: "实时事件", icon: "≈", view: "viewLive" },
+    { id: "situation", label: "态势", icon: "◉", view: "viewSituation" },
+    { id: "events", label: "事件流", icon: "≡", view: "viewEventsGroup" },
   ]},
-  { group: "资产", items: [
+  { group: "资产与情报", items: [
     { id: "fleet", label: "传感器", icon: "▤", view: "viewFleet" },
+    { id: "intel", label: "情报", icon: "◆", view: "viewIntelGroup" },
   ]},
-  { group: "情报", items: [
-    { id: "intel", label: "情报分级", icon: "◆", view: "viewIntel" },
-    { id: "attribution", label: "操作者归因", icon: "⌖", view: "viewAttribution" },
-  ]},
-  { group: "分析", items: [
-    { id: "requests", label: "请求日志", icon: "≡", view: "viewRequests" },
-    { id: "trials", label: "试验明细", icon: "▦", view: "viewTrials" },
-    { id: "events", label: "动作流水", icon: "⇉", view: "viewEvents" },
-    { id: "metrics", label: "指标总览", icon: "◫", view: "viewMetrics" },
-    { id: "summary", label: "汇总指标", icon: "▥", view: "viewSummary" },
-    { id: "compare", label: "模型差分", icon: "⑃", view: "viewCompare" },
-    { id: "bandit", label: "演化实验", icon: "⌁", view: "viewBandit" },
-    { id: "runs", label: "运行记录", icon: "▷", view: "viewRuns" },
+  { group: "研究", items: [
+    { id: "experiments", label: "实验", icon: "⌁", view: "viewExperimentsGroup" },
   ]},
   { group: "系统", items: [
     { id: "config", label: "配置", icon: "⚙", view: "viewConfig" },
   ]},
 ];
+// 旧路由 → 新目的地 (深链接兼容)
+const LEGACY = {
+  live: "events/tail", requests: "events/requests", actions: "events/actions",
+  attribution: "intel/actors", metrics: "situation",
+  summary: "experiments/summary", compare: "experiments/compare",
+  bandit: "experiments/bandit", trials: "experiments/trials", runs: "experiments/runs",
+};
 const ALL_ITEMS = NAV.flatMap((g) => g.items);
 const TITLES = Object.fromEntries(ALL_ITEMS.map((i) => [i.id, i.label]));
 
@@ -59,8 +56,10 @@ function renderNav() {
 
 /* ---------- 生命周期 ---------- */
 async function mount() {
-  const id = (location.hash.replace(/^#\/?/, "") || "situation");
-  const item = ALL_ITEMS.find((i) => i.id === id) || ALL_ITEMS[0];
+  let hash = (location.hash.replace(/^#\/?/, "") || "situation");
+  if (LEGACY[hash]) { location.replace("#/" + LEGACY[hash]); hash = LEGACY[hash]; }
+  const [gid, tab] = hash.split("/");
+  const item = ALL_ITEMS.find((i) => i.id === gid) || ALL_ITEMS[0];
   state.page = item.id;
   renderNav();
   $("#crumbs").innerHTML = `<b>${esc(item.label)}</b>`;
@@ -70,7 +69,7 @@ async function mount() {
   state.view = null;
   const content = $("#content");
   content.innerHTML = "";
-  const ctx = { run: () => state.run };
+  const ctx = { run: () => state.run, tab };
   try {
     const v = await views[item.view](ctx);
     state.view = v;
@@ -123,9 +122,20 @@ async function loadHealth() {
 }
 
 /* ---------- 命令面板 ---------- */
+const TAB_NAV = [
+  ["事件流 · 实时尾流", "events/tail"], ["事件流 · 请求日志", "events/requests"],
+  ["事件流 · 动作流水", "events/actions"], ["情报 · 情报分级", "intel/graded"],
+  ["情报 · 操作者归因", "intel/actors"], ["实验 · 试验明细", "experiments/trials"],
+  ["实验 · 汇总指标", "experiments/summary"], ["实验 · 模型差分", "experiments/compare"],
+  ["实验 · 演化实验", "experiments/bandit"], ["实验 · 运行记录", "experiments/runs"],
+];
 function paletteItems() {
-  const navItems = ALL_ITEMS.map((i) => ({
-    label: i.label, hint: `跳转 · ${i.id}`, act: () => { location.hash = `#/${i.id}`; } }));
+  const navItems = [
+    ...ALL_ITEMS.map((i) => ({
+      label: i.label, hint: `跳转 · ${i.id}`, act: () => { location.hash = `#/${i.id}`; } })),
+    ...TAB_NAV.map(([label, path]) => ({
+      label, hint: "跳转 · " + path, act: () => { location.hash = `#/${path}`; } })),
+  ];
   const actions = [
     { label: "刷新当前页", hint: "动作", act: () => refresh() },
     { label: "导出 STIX 情报", hint: "动作", act: () => window.open(stixUrl(state.run), "_blank") },
