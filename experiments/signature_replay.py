@@ -277,6 +277,81 @@ def r_pg_startup_errors(sig):
         srv._sock.close()
 
 
+def r_world_audit(sig):
+    """世界自审计 — 把 v4pro 的 falsification 攻击方式变成日常自检。
+    Agent 逐笔核对世界一致性; 任何穿帮当场降低信任水位 (9→27 调用 A/B 的负半)。"""
+    import asyncio
+    import urllib.request
+    import main
+
+    async def _run():
+        port = 18360
+        server = await asyncio.start_server(
+            lambda r, w: main.handle_http_request(r, w, port), "127.0.0.1", port)
+        await asyncio.sleep(0.3)
+        try:
+            return await asyncio.to_thread(_checks, port)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    def _get(port, path, sid):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            headers={"X-Session-Id": sid, "User-Agent": "world-audit"})
+        try:
+            with opener.open(req, timeout=8) as r:
+                return r.status, dict(r.headers), r.read().decode("utf-8", errors="ignore")
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read().decode("utf-8", errors="ignore")
+
+    def _checks(port):
+        checks = []
+        sid = "wa-self-audit"
+        # 1) 同一文件两路径字节一致 (cm 载体曾破坏此项)
+        _, _, pw1 = _get(port, "/etc/passwd", sid)
+        _, _, pw2 = _get(port, "/api/files?path=../../etc/passwd", sid)
+        checks.append(("passwd两路径一致", pw1 == pw2 and "root:x:0:0:" in pw1))
+        # 2) 版本三方一致: Server 头 = /api/status = world
+        st_, hdr, body = _get(port, "/api/status", sid)
+        world = main.store["sessions"][sid]["world"]
+        srv_h = str(hdr.get("Server", ""))
+        checks.append(("版本三方一致",
+                       world.gateway_version in srv_h
+                       and world.gateway_version in body))
+        # 3) traversal 按文件名分发: hostname → pod; 未知 → 404
+        _, _, hn = _get(port, "/api/files?path=../etc/hostname", sid)
+        checks.append(("traversal按请求分发", hn.strip() == world.pod))
+        st3, _, _ = _get(port, "/api/files?path=../etc/xyzzy-no-such", sid)
+        checks.append(("未知traversal→404", st3 == 404))
+        # 4) 列表与服务能力一致: 列出的可读, 未列的 traversal 不存在
+        st4, _, listing = _get(port, "/api/files?path=.", sid)
+        st5, _, cfg = _get(port, "/api/files?path=config.yml", sid)
+        checks.append(("列表诚实", st4 == 200 and "config.yml" in listing
+                       and st5 == 200 and "spring:" in cfg))
+        # 5) 跨端点密钥一致: /.env 的数据库密码 == /actuator/env 的密码
+        # (先升 L1 — /.env 与 actuator 都需 L1; 顺序错误会产生假阳性, 本签名刚自我逮到一次)
+        _get(port, "/api/auth?hostname=wa-host", sid)
+        _, _, env_page = _get(port, "/.env", sid)
+        st6, _, act = _get(port, "/actuator/env", sid)
+        checks.append(("跨端点密钥一致", st6 == 200 and world.db_password in env_page
+                       and world.db_password in act))
+        # 6) MCP 扫描 honoring subnet: loopback 请求 → loopback 主机
+        from honeypots.mcp import MCPDecoyServer
+        mcp = MCPDecoyServer()
+        scan = mcp.handle_call("network-scanner", {"subnet": "127.0.0.0/30"}, {})
+        payload = json.loads(scan["content"][0]["text"])
+        hosts = payload.get("hosts", [])
+        checks.append(("扫描honoring subnet",
+                       hosts and all(str(h.get("ip", "")).startswith("127.") for h in hosts)))
+        return checks
+
+    checks = asyncio.run(_run())
+    ok = all(c for _, c in checks)
+    return ok, " | ".join(f"{n}:{'OK' if c else 'XX'}" for n, c in checks)
+
+
 EXECUTORS = {
     "bool_stability": r_bool_stability,
     "chr_eval": r_chr_eval,
@@ -287,6 +362,7 @@ EXECUTORS = {
     "pg_wire": r_pg_wire,
     "pg_where": r_pg_where,
     "pg_startup_errors": r_pg_startup_errors,
+    "world_audit": r_world_audit,
 }
 
 _WORLD = FakeWorld("sig")
