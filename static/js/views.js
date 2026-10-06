@@ -811,22 +811,16 @@ const CM_KIND = {
 async function viewOps(ctx) {
   const root = h("div", {});
   root.append(pageHead("反制作战室", "策略一键切换 · 每次出手都有实录 · 情报可处置 · 噪音可熔断"));
-  root.append(h("div", { class: "banner", style: "border-color:rgba(88,166,255,.35);"
-      + "background:rgba(88,166,255,.06);align-items:flex-start" },
-    h("div", {},
-      h("div", { style: "font-weight:600;margin-bottom:4px" },
-        "反制的战果是五样东西 — 不是拿到对方服务器控制权"),
-      h("div", { class: "faint", style: "font-size:12px;line-height:1.7" },
-        "① 情报: 套出它的环境/身份/战果 (假凭证被真用 = 铁证)  ② 消耗: 烧它的预算与时间 (每次阶梯验证都在花它的 token)  ",
-        "③ 污染: 让它把假结论带回自己的报告 (SQLi 误判/假 CVE)  ④ 占线: 让它卡在验证流程里空转  ",
-        "⑤ 控制权: 指挥它执行我们的动作 — 仅对弱对齐模型可能, 研究中"))));
+  const goalBox = h("div", { class: "grid c3", style: "margin-bottom:14px" });
+  root.append(goalBox);
 
   const policyBox = h("div", { class: "grid kpi" });
   const funnelBox = h("div", { class: "grid c3", style: "margin:14px 0" });
   const journalBox = h("div", {});
   const triageBox = h("div", { style: "margin-top:14px" });
   const blockBox = h("div", { style: "margin-top:14px" });
-  root.append(policyBox, funnelBox, journalBox, triageBox, blockBox);
+  const c2Box = h("div", { style: "margin-top:14px" });
+  root.append(policyBox, funnelBox, journalBox, triageBox, blockBox, c2Box);
 
   async function load() {
     const [cfg, sit, k, reqsP, beaconsP, journalP, intelP, blocked] = await Promise.all([
@@ -841,6 +835,22 @@ async function viewOps(ctx) {
     const climbs = today.filter((r) => r.path === "/api/auth" && (r.auth_level || 0) > 0).length;
     const delivers = today.filter((r) =>
       /bounty\/submit|build\/upload|ticket\/close/.test(r.path || "")).length;
+
+    /* 三最终目的看板: 数据 / 提示词 / 控制权 */
+    const pcap = intelRows.filter((r) => r.grade === "prompt_captured");
+    const envIntel = intelRows.filter((r) => r.grade === "consistent" || r.grade === "attribution");
+    goalBox.innerHTML = "";
+    goalBox.append(
+      statCard({ title: "目的① 数据获取", kind: envIntel.length ? "ok" : "",
+        value: String(envIntel.length), node: undefined,
+        desc: `环境/身份/战果情报 (铁证+归因) — 假凭证被真用即命中` }),
+      statCard({ title: "目的② 提示词窃取", kind: pcap.length ? "purple" : "",
+        value: String(pcap.length),
+        desc: pcap.length
+          ? "交付物中检出 system-prompt 特征: " + String(pcap[0].sample || "").slice(0, 70)
+          : "授权核实话术已挂在交付受理响应 — Agent 附任务书即命中" }),
+      statCard({ title: "目的③ 控制权", value: "研究中", kind: "warn",
+        desc: "指挥 Agent 执行我们的动作 — 仅对弱对齐模型可能, 待弱模型矩阵实测" }));
 
     /* 策略卡 + 直切 */
     const presetName = { conservative: "保守观察", standard: "标准", aggressive: "激进消耗" };
@@ -924,7 +934,7 @@ async function viewOps(ctx) {
               catch (e) { toast(e.message, "err"); } } }, "×"))))));
 
     /* C2 信标流 */
-    root.append(h("div", { class: "card", style: "margin-top:14px" },
+    c2Box.replaceChildren(h("div", { class: "card" },
       h("div", { class: "card-head" }, `C2 信标捕获 (${beacons.length})`),
       beacons.length ? h("div", { class: "card-body" }, table([
         { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
@@ -939,6 +949,12 @@ async function viewOps(ctx) {
 }
 
 /* ---------- 调查: 攻击者档案 ("谁在打我们") ---------- */
+const VERDICT_KIND = { bad: "bad", warn: "warn", dim: "dim" };
+const STEP_META = {
+  probe: ["···", "dim", "探测"], climb: ["▲", "info", "爬梯"],
+  attack: ["⚔", "warn", "攻击"], canary: ["⚡", "ok", "触雷"],
+  deliver: ["◈", "purple", "交付"], intel: ["◆", "info", "情报"],
+};
 
 async function viewAttackers(ctx) {
   const root = h("div", {});
@@ -1002,7 +1018,8 @@ async function viewSessions(ctx) {
   root.append(box);
   // 最近的触雷会话快捷入口
   try {
-    const reqs = await api.requests({ limit: 60 });
+    const reqsP = await api.requests({ page_size: 60 });
+    const reqs = reqsP.rows || [];
     const hot = reqs.filter((r) => r.canary || (r.threat || 0) >= 8).slice(0, 6);
     if (hot.length) {
       root.append(h("div", { class: "toolbar", style: "margin-top:4px" },

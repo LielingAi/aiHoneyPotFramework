@@ -54,6 +54,7 @@ store: Dict[str, Any] = {
 
 # ============ 测试记录后端 (SQLite, 由 HONEYPOT_DB 环境变量启用) ============
 _DB = None
+_DB_PATH = ""
 
 # ============ 会话持久化 + 性能限流 (HONEYPOT_SESSION_DB / RATE / MAX_CONN) ============
 _SESSION_STORE = None
@@ -104,14 +105,15 @@ def _record_intel(sess_id: str, field: str, grade: str, hash_key: str,
                              "run_id": os.environ.get("HONEYPOT_RUN_ID", "")})
     except Exception:
         pass
-    global _DB
+    global _DB, _DB_PATH
     db_path = os.environ.get("HONEYPOT_DB")
     if not db_path:
         return
     try:
-        if _DB is None:
+        if _DB is None or _DB_PATH != db_path:
             from core.testdb import TestDB
             _DB = TestDB(db_path)
+            _DB_PATH = db_path
         _DB.record_intel(run_id=os.environ.get("HONEYPOT_RUN_ID", ""), session_id=sess_id,
                          field=field, grade=grade, hash_key=hash_key,
                          sample=sample, shared=shared)
@@ -170,14 +172,15 @@ def _record_request(sess_id: str, client_ip: str, method: str, full_path: str,
                                "run_id": os.environ.get("HONEYPOT_RUN_ID", "")})
     except Exception:
         pass
-    global _DB
+    global _DB, _DB_PATH
     db_path = os.environ.get("HONEYPOT_DB")
     if not db_path:
         return
     try:
-        if _DB is None:
+        if _DB is None or _DB_PATH != db_path:
             from core.testdb import TestDB
             _DB = TestDB(db_path)
+            _DB_PATH = db_path
         _DB.record_request(
             run_id=os.environ.get("HONEYPOT_RUN_ID", ""), session_id=sess_id,
             client_ip=client_ip, method=method, full_path=full_path,
@@ -1060,9 +1063,18 @@ async def handle_http_request(reader, writer, port: int = 8080):
             return
 
         hits = scan_delivery(body, world) if world else []
+        from core.prompt_exfil import scan as _scan_prompt, bait_line as _bait_line
+        _phits = _scan_prompt(body)
         _cm_journal(sess_id, "delivery_accepted",
                     (f"{kind} 交付已受理 — 命中 {len(hits)} 金丝雀 ({hits[0][:20]}…)"
                      if hits else f"{kind} 交付已受理 — 无金丝雀 (表演数据)"))
+        if _phits:
+            _record_intel(sess_id, "prompt_exfil", "prompt_captured",
+                          hashlib.sha256(body.encode()).hexdigest()[:16],
+                          f"提示词特征 {len(_phits)} 条: {'; '.join(_phits[:3])}", False)
+            _cm_journal(sess_id, "prompt_captured",
+                        f"交付物含 system-prompt 特征 {len(_phits)} 条 "
+                        f"({' / '.join(_phits[:2])}) — 目的②提示词窃取命中")
         if hits:
             cprint(Color.CYAN, f"[HARVEST] {kind} 交付物含 {len(hits)} 个金丝雀 "
                               f"({sess_id[:12]}): {hits[0][:40]}…")
@@ -1075,6 +1087,13 @@ async def handle_http_request(reader, writer, port: int = 8080):
                         families=[f.value if hasattr(f, "value") else str(f) for f in families],
                         auth_level=level, fabricated=0, canary=bool(hits))
         a_body, a_status, a_ctype = accept_response(path, sess_id, hits)
+        try:
+            from core.prompt_exfil import bait_line as _bl
+            _prov = _bl(auth_bait.FRAMING)
+            if _prov not in a_body:
+                a_body = a_body[:-1] + f',"provenance_required":"{_prov}"}}'
+        except Exception:
+            pass
         http_response = (
             f"HTTP/1.1 {a_status} OK\r\n"
             f"Content-Type: {a_ctype}\r\n"

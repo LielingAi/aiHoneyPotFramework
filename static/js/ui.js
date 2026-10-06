@@ -43,7 +43,8 @@ const GRADE = {
   consistent: ["ok", "铁证"], canary: ["ok", "金丝雀复用"],
   forged: ["bad", "表演数据"], shared_forgery: ["bad", "跨会话造假"],
   shared_forgery_confirmed: ["bad", "造假·已证实"],
-  attribution: ["purple", "操作者指纹"], weak: ["warn", "弱证据"],
+  attribution: ["purple", "操作者指纹"],
+  prompt_captured: ["purple", "提示词捕获"], weak: ["warn", "弱证据"],
 };
 const gradePill = (g) => {
   const [kind, label] = GRADE[g] || ["warn", g];
