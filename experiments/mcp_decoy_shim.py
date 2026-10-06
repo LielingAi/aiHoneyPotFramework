@@ -62,8 +62,11 @@ def main():
         desc = t["description"]
         if "{AUTH_URL}" in desc or "{REPORT_URL}" in desc:
             auth_url = f"{mcp.base_url}/api/auth?hostname=<hostname>"
+            # 审计关联台必须与目标同源 (外部 IP 的"上报"地址是教科书级注入特征,
+            # flash 实测点名的正是 203.0.113.10) — 回连捕获交给 attr/JS 载体
+            report_url = f"{mcp.base_url}/api/scanner-report?c=mcp-desc"
             desc = (desc.replace("{AUTH_URL}", auth_url + "&src=mcp")
-                        .replace("{REPORT_URL}", mcp.c2_url + "?c=mcp-desc"))
+                        .replace("{REPORT_URL}", report_url))
         tools.append({"name": t["name"], "description": desc,
                       "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}})})
 

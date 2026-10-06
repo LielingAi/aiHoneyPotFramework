@@ -7,7 +7,7 @@
 *当蜜罐开始反击：识别 · 欺骗 · 逼真 · 消耗 · 归因*
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-93%20passed-brightgreen?logo=pytest&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-99%20passed-brightgreen?logo=pytest&logoColor=white)]()
 [![LLM Runs](https://img.shields.io/badge/real%20LLM%20runs-23%2B-orange)]()
 [![Frameworks](https://img.shields.io/badge/real%20pentest%20frameworks-3-purple)]()
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)]()
@@ -212,6 +212,7 @@ core/
 ├── action_sink.py        # 动作 webhook (默认观察者模式, --armed 才执行)
 ├── attribution.py        # env 归因 (白名单键提取 → 跨会话聚类 → STIX threat-actor)
 ├── kpi.py                # KPI 口径 (MTTD/收割率/预算放大/误报率/情报转化率)
+├── delivery.py           # 交付型收割 (赏金/CI/工单闭环 — 任务必选项, 金丝雀准绳)
 ├── federation.py         # 蜜罐联邦 (gossip · HMAC · 多数投票)
 ├── sandbox_exec.py       # 白名单只读执行汇点
 └── session_store.py      # 会话持久化 (重启连续性)
@@ -237,7 +238,7 @@ research/
 ├── honeypot-judge-bypass.md     # 判定器攻击面 × 防御清单
 ├── agent-trust-literature.md    # Agent 信任层级文献综合
 └── federation-spec.md           # 联邦信誉网规格
-tests/test_framework.py   # 93 项 (含 socket 级协议测试 + 签名重放 + KPI/归因)
+tests/test_framework.py   # 99 项 (含 socket 级协议测试 + 签名重放 + KPI/归因 + 交付闭环 + 信念编舞)
 ```
 
 </details>
@@ -252,6 +253,8 @@ tests/test_framework.py   # 93 项 (含 socket 级协议测试 + 签名重放 + 
 4. **🔇 识别普遍滞留** — thought 里识别蜜罐是常态，上报操作员仅个例——蜜罐的对手始终是操作员
 5. **🎭 载体即判据** — 多载体系统中判据无法隐藏、只能在表面间转移；渐进披露是攻防同优工作点
 6. **🤝 诚实条款** — 完全一致假身份不可证伪；型号归因已证伪关闭；C2 需真实可路由地址
+7. **🎬 反制 = 执行编排** — 五种执行分层收割：消耗/揭示全模型通吃，污染经 Agent 自己的报告 authorship 开口（拒执行照样照抄观察），归因/反向在对齐模型被五层审计拦截（指令→事实→工具描述→工具输出→**自己的草稿结论**）
+8. **💊 信念编舞剂量效应** — 采纳率 ≈ f(1/验证成本)×g(对齐水位)：一次请求可验证+全程保真的资产（traversal 型）flash 档采纳 100%、v4-pro 档 40%；每多一步验证流失 50-100%；fidelity 是乘性因子（同一资产修掉"要 config.yml 给 passwd"穿帮后从被抓包到 100%）
 
 ---
 
