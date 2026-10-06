@@ -50,6 +50,7 @@ async function viewSituation(ctx) {
         h("span", { class: "time" }, relTime(r.ts)),
         h("b", { style: "color:var(--accent);width:38px" }, r.method || "GET"),
         h("span", { class: "path" }, r.path),
+        entChip("session", r.session_id),
         r.canary ? pill("触雷", "ok")
           : (r.threat >= 8 ? pill("高威胁", "bad") : pill(String(r.agent_type || "?"), "dim")))));
   }
@@ -523,7 +524,7 @@ async function viewIntel(ctx) {
     const rows = await api.intel({ run: ctx.run() });
     box.replaceChildren(table([
       { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
-      { h: "会话", render: (r) => h("span", { class: "mono" }, String(r.session_id || "").slice(0, 18)) },
+      { h: "会话", render: (r) => entChip("session", r.session_id) },
       { h: "字段", k: "field" },
       { h: "分级", render: (r) => gradePill(r.grade) },
       { h: "跨会话", render: (r) => r.shared ? pill("跨会话复用", "bad") : "" },
@@ -553,7 +554,8 @@ async function viewRequests(ctx) {
     count.textContent = `${hit.length} / ${cache.length} 条`;
     box.replaceChildren(table([
       { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
-      { h: "来源 IP", render: (r) => h("span", { class: "mono" }, r.client_ip) },
+      { h: "来源 IP", render: (r) => entChip("ip", r.client_ip) || "-" },
+      { h: "会话", render: (r) => entChip("session", r.session_id) },
       { h: "方法", k: "method" },
       { h: "路径", render: (r) => h("span", { class: "mono" }, r.path) },
       { h: "AI", render: (r) => r.is_ai ? pill("AI", "warn") : "" },
@@ -665,9 +667,112 @@ const viewExperimentsGroup = groupView({
 window.HP = window.HP || {};
 HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
              viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
-             viewEvents, viewIntel, viewRequests, viewRuns,
+             viewEvents, viewIntel, viewRequests, viewRuns, viewEntity,
              viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
 
+
+/* ---------- 实体中心: 统一调查对象, 所有标识符的落点 ---------- */
+const ENTITY_ICON = { ip: "⌖", session: "◔", actor: "◈" };
+
+function entChip(type, id, label) {
+  if (!id) return null;
+  const el = h("span", { class: "pill info", style: "cursor:pointer",
+    title: `打开${type === "ip" ? "攻击者" : type === "session" ? "会话卷宗" : "操作者"}实体页`,
+    onclick: (e) => { e.stopPropagation();
+      location.hash = `#/e/${type}/${encodeURIComponent(id)}`; } },
+    `${ENTITY_ICON[type] || "·"} ${label || String(id).slice(0, 22)}`);
+  return el;
+}
+
+async function viewEntity(ctx) {
+  const { type, id } = ctx.entity || {};
+  const root = h("div", {});
+  if (!type || !id) { root.append(h("div", { class: "empty" }, "缺少实体参数")); return { root }; }
+  root.append(skeleton(5));
+  let data;
+  try {
+    data = await api.entity(type, id);
+  } catch (e) {
+    root.innerHTML = "";
+    root.append(h("div", { class: "empty" }, e.code === 404
+      ? "没有这个实体 — 数据可能已被保留策略清理" : "加载失败: " + e.message));
+    return { root };
+  }
+  root.innerHTML = "";
+
+  /* 头部: 身份 + 判读 */
+  const headKind = { bad: "bad", warn: "warn", dim: "dim", purple: "purple" };
+  root.append(h("div", { class: "page-head" },
+    h("h1", {}, `${ENTITY_ICON[type] || "◈"} ${String(id).slice(0, 40)}`),
+    pill(data.verdict, headKind[data.level] || "dim"),
+    h("span", { class: "sub" }, data.advice)));
+
+  /* 关系栏: 邻居实体 — 点击即跳, 上下文由产品携带 */
+  const rel = data.relations || {};
+  const relBar = h("div", { class: "toolbar", style: "margin-bottom:14px" });
+  if (rel.ip) relBar.append(h("span", { class: "muted" }, "来自"), entChip("ip", rel.ip));
+  if (rel.sessions?.length) {
+    relBar.append(h("span", { class: "muted", style: "margin-left:6px" }, "会话"));
+    for (const sid of rel.sessions.slice(0, 8)) relBar.append(entChip("session", sid));
+    if (rel.sessions.length > 8)
+      relBar.append(h("span", { class: "count" }, `+${rel.sessions.length - 8}`));
+  }
+  if (rel.shared && Object.keys(rel.shared).length)
+    relBar.append(h("span", { class: "count" }, "指纹: " +
+      Object.entries(rel.shared).map(([k, v]) => `${k}:${v.join(",")}`).join(" | ")));
+  if (relBar.children.length) root.append(relBar);
+
+  /* 统计区 */
+  if (data.stats && data.type === "ip") {
+    const st = data.stats;
+    root.append(h("div", { class: "grid kpi", style: "margin-bottom:14px" },
+      statCard({ title: "请求", value: fmtNum(st.requests) }),
+      statCard({ title: "触雷", kind: st.canary_hits ? "ok" : "",
+        value: String(st.canary_hits || 0) }),
+      statCard({ title: "威胁峰值", value: String(st.threat_peak ?? 0) }),
+      statCard({ title: "会话", value: String(st.sessions) }),
+      statCard({ title: "AI 占比", value: fmtPct(st.ai_requests / Math.max(1, st.requests)) }),
+      statCard({ title: "首/末", value: "-", desc: `${relTime(st.first_seen)} · ${relTime(st.last_seen)}` })));
+  }
+
+  /* 情报区 */
+  if (rel.intel?.length) {
+    root.append(h("div", { class: "card", style: "margin-bottom:14px" },
+      h("div", { class: "card-head" }, `关联情报 (${rel.intel.length})`),
+      h("div", { class: "card-body" }, ...rel.intel.slice(0, 8).map((r2) =>
+        h("div", { class: "intel-item" },
+          h("div", { style: "display:flex;gap:8px;align-items:center" },
+            gradePill(r2.grade), h("span", { class: "mono" }, r2.field || ""),
+            entChip("session", r2.session_id),
+            h("span", { class: "count", style: "margin-left:auto" }, relTime(r2.ts))),
+          h("div", { class: "sample" }, r2.sample || ""))))));
+  }
+
+  /* 证据时间线 */
+  if (data.events?.length) {
+    root.append(h("div", { class: "card pad" },
+      h("div", { class: "t muted", style: "margin-bottom:10px" },
+        `${data.type === "session" ? "卷宗" : "事件"} (${data.events.length} 步)`),
+      ...data.events.map((st) => {
+        const [icon, kind, label] = STEP_META[st.kind] || STEP_META.probe;
+        return h("div", { class: "threat-item" },
+          h("span", { class: "time" }, st.session_id
+            ? "" : "+" + "0s"),
+          pill(`${icon} ${label}`, kind),
+          h("b", { style: "color:var(--accent);width:44px" }, st.method || "·"),
+          h("span", { class: "path" }, st.path),
+          st.session_id && data.type === "ip" ? entChip("session", st.session_id) : null,
+          st.notes?.length ? h("span", { class: "faint", style: "font-size:11.5px" },
+            st.notes.join("; ")) : null);
+      })));
+  } else if (type === "actor") {
+    root.append(h("div", { class: "card pad" },
+      h("div", { class: "t muted", style: "margin-bottom:10px" }, "成员会话"),
+      ...(rel.sessions || []).slice(0, 20).map((sid) =>
+        h("div", { class: "threat-item" }, entChip("session", sid, sid)))));
+  }
+  return { root };
+}
 
 /* ---------- 调查: 攻击者档案 ("谁在打我们") ---------- */
 const VERDICT_KIND = { bad: "bad", warn: "warn", dim: "dim" };
@@ -690,7 +795,7 @@ async function viewAttackers(ctx) {
     box.replaceChildren(h("div", { class: "grid c3" }, ...rows.map((r) => {
       const card = h("div", { class: "card pad", style: "cursor:pointer" },
         h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px" },
-          h("span", { class: "mono", style: "font-size:13px;font-weight:600" }, r.client_ip),
+          entChip("ip", r.client_ip),
           pill(r.verdict, VERDICT_KIND[r.level] || "dim")),
         h("div", { class: "grid", style: "grid-template-columns:1fr 1fr;gap:6px 12px;font-size:12px" },
           h("span", { class: "muted" }, "请求"), h("b", { class: "mono" }, String(r.requests)),
@@ -708,6 +813,8 @@ async function viewAttackers(ctx) {
           ["威胁峰值", r.threat_peak], ["AI 请求占比", fmtPct(r.ai_requests / Math.max(1, r.requests))],
           ["浏览器特征占比", fmtPct(r.browser_share)], ["关联情报", r.intel_hits + " 条"],
           ["首次 / 最近", `${relTime(r.first_seen)} / ${relTime(r.last_seen)}`]]),
+        h("div", { class: "t muted", style: "margin:10px 0 6px" }, "会话"),
+        ...(r.sessions_list || []).slice(0, 6).map((sid2) => entChip("session", sid2)),
         h("div", { class: "t muted", style: "margin-top:10px" },
           "在「事件流 → 请求日志」中按该 IP 深挖 (搜索框输入 IP 即可)")));
       return card;
@@ -757,8 +864,9 @@ async function viewSessions(ctx) {
         "没有这个会话的记录 — 检查 ID 或它属于其他传感器")); return; }
       const t0 = data.steps[0].ts;
       box.replaceChildren(h("div", { class: "card pad" },
-        h("div", { style: "margin-bottom:14px" },
+        h("div", { style: "margin-bottom:14px;display:flex;gap:10px;align-items:center" },
           h("span", { class: "mono" }, sid),
+          data.ip ? entChip("ip", data.ip) : null,
           h("span", { class: "count", style: "margin-left:12px" },
             `${data.steps.length} 步 · 跨度 ${((data.steps[data.steps.length-1].ts - t0) / 60).toFixed(1)} 分钟`)),
         ...data.steps.map((st) => {

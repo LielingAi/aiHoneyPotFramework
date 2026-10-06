@@ -63,8 +63,15 @@ function renderNav() {
 async function mount() {
   let hash = (location.hash.replace(/^#\/?/, "") || "situation");
   if (LEGACY[hash]) { location.replace("#/" + LEGACY[hash]); hash = LEGACY[hash]; }
+  // 实体路由: #/e/<type>/<id> — 统一调查对象, 跨页游走的落点
+  let entity = null;
+  if (hash.startsWith("e/")) {
+    const [, etype, ...rest] = hash.split("/");
+    entity = { type: etype, id: decodeURIComponent(rest.join("/")) };
+  }
   const [gid, tab] = hash.split("/");
-  const item = ALL_ITEMS.find((i) => i.id === gid) || ALL_ITEMS[0];
+  const item = ALL_ITEMS.find((i) => i.id === gid) ||
+    (entity ? { id: "entity", label: "调查对象", view: "viewEntity" } : ALL_ITEMS[0]);
   state.page = item.id;
   renderNav();
   $("#crumbs").innerHTML = `<b>${esc(item.label)}</b>`;
@@ -74,7 +81,7 @@ async function mount() {
   state.view = null;
   const content = $("#content");
   content.innerHTML = "";
-  const ctx = { run: () => state.run, tab };
+  const ctx = { run: () => state.run, tab, entity };
   try {
     const v = await views[item.view](ctx);
     state.view = v;

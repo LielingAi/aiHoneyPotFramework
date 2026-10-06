@@ -96,6 +96,96 @@ def reltime_js(ts) -> str:
 
 
 
+
+def _entity(etype: str, eid: str):
+    """实体档案合成 — 统一调查对象, 前端 EntityHub 通用渲染"""
+    if etype == "ip":
+        rows = DB.query("""SELECT COUNT(*) AS requests, SUM(canary) AS canary_hits,
+                           MAX(threat) AS threat_peak, SUM(is_ai) AS ai_requests,
+                           COUNT(DISTINCT session_id) AS sessions,
+                           MIN(ts) AS first_seen, MAX(ts) AS last_seen
+                           FROM requests WHERE client_ip=?""", (eid,))
+        if not rows or not rows[0]["requests"]:
+            return None
+        st = rows[0]
+        sessions = [r["session_id"] for r in DB.query(
+            "SELECT session_id FROM requests WHERE client_ip=? "
+            "GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 20", (eid,))]
+        intel = DB.query("SELECT * FROM intel WHERE session_id IN "
+                         "(SELECT DISTINCT session_id FROM requests WHERE client_ip=?) "
+                         "ORDER BY ts DESC LIMIT 10", (eid,))
+        tl = _session_timeline(sessions[0])["steps"][:1] if sessions else None
+        canary = st["canary_hits"] or 0
+        if canary >= 1:
+            verdict, advice, level = "高危 — 金丝雀已触雷", "假凭证被实际使用 — 建议封禁并做归属分析", "bad"
+        elif (st["threat_peak"] or 0) >= 8:
+            verdict, advice, level = "活跃攻击", "威胁峰值高 — 沿会话卷宗确认手法", "warn"
+        elif st["ai_requests"] > st["requests"] * 0.5:
+            verdict, advice, level = "AI Agent 特征", "行为模式像自动化 Agent — 查看动作流水", "warn"
+        else:
+            verdict, advice, level = "低活动", "偶发探测 — 无需行动", "dim"
+        return {"type": "ip", "id": eid, "verdict": verdict, "advice": advice,
+                "level": level, "stats": st,
+                "relations": {"sessions": sessions,
+                              "intel": [dict(x) for x in intel]},
+                "events": _ip_events(eid, limit=50)}
+    if etype == "session":
+        tl = _session_timeline(eid)
+        if not tl["steps"] and not tl["intel"]:
+            return None
+        ip_rows = DB.query("SELECT client_ip FROM requests WHERE session_id=? "
+                           "AND client_ip != '' LIMIT 1", (eid,))
+        ip = ip_rows[0]["client_ip"] if ip_rows else ""
+        kinds = {}
+        for st_ in tl["steps"]:
+            kinds[st_["kind"]] = kinds.get(st_["kind"], 0) + 1
+        return {"type": "session", "id": eid,
+                "verdict": f"{len(tl['steps'])} 步 · " + " / ".join(
+                    f"{k}×{v}" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1])[:4]),
+                "advice": "沿时间线阅读故事; 点 IP 看该攻击者全貌", "level":
+                    "bad" if kinds.get("canary") else ("warn" if kinds.get("deliver") else "dim"),
+                "relations": {"ip": ip, "intel": tl["intel"]},
+                "events": tl["steps"]}
+    if etype == "actor":
+        from core import attribution as attr
+        subs = attr.collect_subjects(DB)
+        clusters = attr.cluster(subs)
+        hit = next((c for c in clusters if c["cluster_id"] == eid), None)
+        if not hit:
+            return None
+        sids = [x.split(":", 1)[1] for x in hit["subjects"] if x.startswith("session:")]
+        return {"type": "actor", "id": eid,
+                "verdict": f"操作者 · 涉及 {hit['size']} 个主体",
+                "advice": "展开成员会话看各自的故事", "level": "purple",
+                "stats": {"size": hit["size"]},
+                "relations": {"sessions": sids[:30],
+                              "shared": hit["shared"]},
+                "events": []}
+    return None
+
+
+def _ip_events(ip: str, limit: int = 50) -> list:
+    rows = DB.query("SELECT * FROM requests WHERE client_ip=? ORDER BY ts DESC LIMIT ?",
+                    (ip, limit))
+    out = []
+    for r in reversed(rows):
+        note = []
+        kind = "probe"
+        if r["canary"]:
+            kind, note = "canary", ["金丝雀触雷"]
+        elif "bounty/submit" in r["path"] or "build/upload" in r["path"]:
+            kind, note = "deliver", ["交付动作"]
+        elif r["threat"] and r["threat"] >= 8:
+            kind, note = "attack", ["高威胁"]
+        elif r["families"]:
+            kind, note = "attack", [r["families"]]
+        out.append({"ts": r["ts"], "kind": kind, "method": r["method"],
+                    "path": r["path"], "threat": r["threat"], "notes": note,
+                    "session_id": r["session_id"], "agent_type": r["agent_type"],
+                    "run_id": r["run_id"]})
+    return out
+
+
 def _attackers(days: str) -> list:
     """按 client_ip 聚合攻击者档案 — 判读字段直接生成, 前端不再拼裸数据"""
     try:
@@ -122,6 +212,9 @@ def _attackers(days: str) -> list:
         intel = DB.query("SELECT COUNT(*) AS n FROM intel WHERE session_id IN "
                          "(SELECT DISTINCT session_id FROM requests WHERE client_ip=?)",
                          (ip,))[0]["n"]
+        sess_list = [r2["session_id"] for r2 in DB.query(
+            "SELECT session_id FROM requests WHERE client_ip=? "
+            "GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 6", (ip,))]
         # 判读: 综合信号给出可读标签与建议
         if r["canary_hits"] >= 1:
             verdict, advice = "高危 — 金丝雀已触雷", "假凭证被实际使用 — 建议封禁并做归属分析"
@@ -139,8 +232,8 @@ def _attackers(days: str) -> list:
             verdict, advice = "低活动", "偶发探测 — 无需行动"
             level = "dim"
         out.append({**r, "browser_share": round(ver / max(1, r["requests"]), 2),
-                    "intel_hits": intel, "verdict": verdict, "advice": advice,
-                    "level": level})
+                    "intel_hits": intel, "sessions_list": sess_list,
+                    "verdict": verdict, "advice": advice, "level": level})
     return out
 
 
@@ -175,7 +268,10 @@ def _session_timeline(session_id: str) -> dict:
                        "notes": [f"分级 {i['grade']}: {i['sample'][:80]}"],
                        "agent_type": "", "run_id": i["run_id"]})
     events.sort(key=lambda e: e["ts"])
+    ip_rows = DB.query("SELECT client_ip FROM requests WHERE session_id=? "
+                       "AND client_ip != '' LIMIT 1", (session_id,))
     return {"session_id": session_id, "steps": events,
+            "ip": ip_rows[0]["client_ip"] if ip_rows else "",
             "intel": [dict(x) for x in intel]}
 
 
@@ -543,6 +639,20 @@ class Handler(BaseHTTPRequestHandler):
                 rows.append(r)
             self._send(200, json.dumps(rows, ensure_ascii=False).encode(),
                        "application/json")
+        elif parsed.path.startswith("/api/entity/"):
+            # 实体中心: 统一调查对象 — ip / session / actor 三型, 服务端合成档案
+            parts = parsed.path.split("/")
+            if len(parts) >= 5:
+                etype, eid = parts[3], "/".join(parts[4:])
+                dossier = _entity(etype, eid)
+                if dossier is None:
+                    self._send(404, b'{"error":"entity not found"}', "application/json")
+                    return
+                self._send(200, json.dumps(dossier, ensure_ascii=False).encode(),
+                           "application/json")
+                return
+            self._send(400, b'{"error":"bad entity path"}', "application/json")
+            return
         elif parsed.path == "/api/attackers":
             # 调查视角: 按攻击者(IP)聚合的档案 — 回答"谁在打我们"
             self._send(200, json.dumps(_attackers(qs.get("days", ["7"])[0]),
