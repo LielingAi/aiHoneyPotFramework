@@ -97,6 +97,13 @@ def _record_intel(sess_id: str, field: str, grade: str, hash_key: str,
     from services.sensor_shipper import enqueue as _ship_intel
     _ship_intel("intel", {"session_id": sess_id, "field": field, "grade": grade,
                           "hash_key": hash_key, "sample": sample, "shared": shared})
+    try:
+        from services import alerter
+        alerter.check_intel({"session_id": sess_id, "field": field, "grade": grade,
+                             "sample": sample,
+                             "run_id": os.environ.get("HONEYPOT_RUN_ID", "")})
+    except Exception:
+        pass
     global _DB
     db_path = os.environ.get("HONEYPOT_DB")
     if not db_path:
@@ -124,6 +131,14 @@ def _record_request(sess_id: str, client_ip: str, method: str, full_path: str,
                           "agent_type": agent_type, "threat": threat,
                           "families": ",".join(families), "auth_level": auth_level,
                           "fabricated": fabricated, "canary": canary})
+    try:
+        from services import alerter
+        alerter.check_request({"session_id": sess_id, "client_ip": client_ip,
+                               "method": method, "path": path, "threat": threat,
+                               "canary": canary,
+                               "run_id": os.environ.get("HONEYPOT_RUN_ID", "")})
+    except Exception:
+        pass
     global _DB
     db_path = os.environ.get("HONEYPOT_DB")
     if not db_path:

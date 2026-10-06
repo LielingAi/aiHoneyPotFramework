@@ -132,12 +132,17 @@ td.num,th.num{font-family:var(--mono);text-align:right}
 .note{color:var(--faint);font-size:11.5px}
 #toast{position:fixed;bottom:20px;right:20px;background:var(--panel2);border:1px solid var(--bad);
   color:var(--bad);padding:9px 16px;border-radius:9px;font-size:12.5px;display:none;z-index:99}
+.liveln{padding:5px 12px;border-bottom:1px solid rgba(34,43,56,.5);font-size:12.5px;
+  display:flex;gap:8px;align-items:center}
+.liveln b{color:var(--accent);min-width:34px}
+#livefeed{max-height:280px;overflow-y:auto}
+#livefeed .pill{flex-shrink:0}
 </style></head><body>
 
 <header class="topbar">
   <span class="brand"><span class="dot"></span>AI <b>蜜罐</b>研究面板</span>
   <nav id="nav">
-    <a href="#metrics" class="on">指标总览</a><a href="#bandit">演化实验</a>
+    <a href="#metrics" class="on">指标总览</a><a href="#live">实时</a><a href="#bandit">演化实验</a>
     <a href="#attribution">操作者归因</a><a href="#summary">汇总指标</a>
     <a href="#compare">模型差分</a><a href="#trials">试验明细</a><a href="#events">动作流水</a>
     <a href="#intel">情报分级</a><a href="#requests">请求日志</a><a href="#runs">运行记录</a>
@@ -152,6 +157,9 @@ td.num,th.num{font-family:var(--mono);text-align:right}
 
 <main>
 <section id="metrics"><h2>指标总览 — 与 analyze.py kpi 同口径</h2><div class="cards" id="kpi"></div></section>
+<section id="live"><h2>实时事件流 — SSE 推送 (传感器触达即显) <span class="count" id="alertst"></span></h2>
+  <div class="panel" id="livefeed"><div class="empty">等待事件… (对传感器发任意请求即出现)</div></div>
+</section>
 <section id="bandit"><h2>演化实验 — 自动 A/B 各组合臂进展</h2><div class="panel" id="bandit_p"></div></section>
 <section id="attribution"><h2>操作者归因 — 跨会话聚类 (谁在打我们)</h2><div class="panel" id="attribution_p"></div></section>
 <section id="summary"><h2>汇总指标 — 模型 × 人设 × 场景</h2><div class="panel" id="summary_p"></div></section>
@@ -291,6 +299,9 @@ async function load(){
     {h:"模拟数据",k:"mock",f:r=>r.mock?pill("模拟","dim"):""},
     {h:"备注",k:"note",f:r=>`<span class="note">${esc(r.note)}</span>`},
     {h:"试验数",k:"n",num:1}]);
+  const al=await api("alerts");
+  g("alertst").innerHTML=al.webhook?
+    `告警渠道: ${esc(al.fmt)} @ 阈值 ${al.threshold}`:"告警渠道: 未配置 (HONEYPOT_ALERT_WEBHOOK)";
 }
 
 async function load_trials(){
@@ -353,6 +364,25 @@ const io=new IntersectionObserver(es=>{
 },{rootMargin:"-20% 0px -70% 0px"});
 document.querySelectorAll("main section").forEach(s=>io.observe(s));
 
+/* ---------- 实时事件流 (SSE) ---------- */
+const feed=g("livefeed");
+function liveLine(r){
+  if(feed.querySelector(".empty"))feed.innerHTML="";
+  const d=document.createElement("div");
+  d.className="liveln";
+  d.innerHTML=`<span class="time">${new Date(r.ts*1000).toLocaleTimeString()}</span> `+
+    `<b>${esc(r.method||"GET")}</b> <span class="mono">${esc(r.path)}</span> `+
+    `<span class="note">${esc(r.client_ip||"")}</span>`+
+    (r.canary?` ${pill("触雷","ok")}`:r.threat>=8?` ${pill("高威胁","bad")}`:"")+
+    (r.run_id?` ${pill(String(r.run_id).replace("sensor_","").slice(0,14),"dim")}`:"");
+  feed.prepend(d);
+  while(feed.children.length>50)feed.lastChild.remove();
+}
+try{
+  const es=new EventSource("/api/events/stream"+(TOKEN?`?token=${encodeURIComponent(TOKEN)}`:""));
+  es.onmessage=(e)=>{try{liveLine(JSON.parse(e.data));}catch(_){}};
+}catch(_){}
+
 load();setInterval(()=>{if(!document.hidden)load();},8000);
 </script></body></html>"""
 
@@ -396,6 +426,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             n_req = DB.ingest_requests(payload.get("requests", []))
             n_int = DB.ingest_intel(payload.get("intel", []))
+            # P1 告警: 汇聚侧评估每条入库记录 (canary/铁证/高威胁), 去抖后推 webhook
+            try:
+                from services import alerter
+                for r in payload.get("requests", []):
+                    alerter.check_request(r)
+                for r in payload.get("intel", []):
+                    alerter.check_intel(r)
+            except Exception:
+                pass
             self._send(200, json.dumps({"ingested": n_req + n_int,
                                         "requests": n_req, "intel": n_int}
                                        ).encode(), "application/json")
@@ -413,6 +452,38 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             body = PAGE.replace("__DBPATH__", DB.path).encode("utf-8")
             self._send(200, body, "text/html; charset=utf-8")
+        elif parsed.path == "/api/events/stream":
+            # P1 实时推送: SSE — 新请求事件流 (传感器汇聚后 1s 内达面板)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            last = 0
+            try:
+                while True:
+                    # 实时流语义: 无 Last-Event-ID 的首连从当前最新开始 (不回放历史);
+                    # 断线重连带 Last-Event-ID 则从该 id 续传
+                    hdr_last = self.headers.get("Last-Event-ID", "")
+                    if hdr_last:
+                        last = int(hdr_last)
+                    elif last == 0 and not getattr(self, "_started", False):
+                        row = q("SELECT COALESCE(MAX(req_id),0) AS m FROM requests")
+                        last = row[0]["m"] if row else 0
+                        self._started = True
+                    rows = q("SELECT req_id, ts, client_ip, method, path, threat,"
+                             " canary, agent_type, run_id FROM requests"
+                             " WHERE req_id > ? ORDER BY req_id LIMIT 50", (last,))
+                    for r in rows:
+                        last = max(last, r["req_id"])
+                        self.wfile.write(
+                            f"id: {r['req_id']}\ndata: {json.dumps(r, ensure_ascii=False)}\n\n"
+                            .encode("utf-8"))
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    time.sleep(1)
+            except (OSError, ConnectionResetError):
+                return
         elif parsed.path == "/api/runs":
             rows = q("""SELECT r.*, (SELECT COUNT(*) FROM trials t WHERE t.run_id=r.run_id) AS n
                         FROM runs r ORDER BY started DESC""")
@@ -481,6 +552,10 @@ class Handler(BaseHTTPRequestHandler):
             lim = int(qs.get("limit", ["100"])[0])
             rows = q(f"SELECT * FROM requests {run_cond} ORDER BY req_id DESC LIMIT ?", (*params, lim))
             self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/alerts":
+            from services import alerter
+            self._send(200, json.dumps(alerter.status(), ensure_ascii=False).encode(),
+                       "application/json")
         elif parsed.path == "/api/kpi":
             from core.kpi import compute
             try:

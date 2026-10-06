@@ -1579,6 +1579,137 @@ class TestProductInfra:
             os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
             srv.shutdown()
 
+    def test_alerter_triggers_dedup_and_formats(self, tmp_path):
+        """告警: canary/铁证/阈值触发, 同键 60s 去抖, generic 与 dingtalk 两种格式"""
+        import threading
+        import time as _t
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from services import alerter
+
+        got = []
+
+        class Recv(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", "0"))
+                got.append(json.loads(self.rfile.read(n)))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Recv)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            os.environ["HONEYPOT_ALERT_WEBHOOK"] = f"http://127.0.0.1:{port}/hook"
+            # generic 格式: canary 触发
+            assert alerter.check_request({"canary": 1, "path": "/api/bounty/submit",
+                                          "method": "POST", "client_ip": "1.2.3.4",
+                                          "session_id": "s1", "run_id": "sensor_x"}) is None or True
+            _t.sleep(0.3)
+            assert len(got) == 1 and "text" in got[0] and "金丝雀" in got[0]["text"]
+            # 去抖: 同 session+path 立即重复 → 不再发
+            alerter.check_request({"canary": 1, "path": "/api/bounty/submit",
+                                   "session_id": "s1"})
+            _t.sleep(0.3)
+            assert len(got) == 1, "去抖失效"
+            # 不同 path → 再发
+            alerter.check_request({"canary": 1, "path": "/.env", "session_id": "s1",
+                                   "method": "GET", "client_ip": "1.2.3.4"})
+            _t.sleep(0.3)
+            assert len(got) == 2
+            # 铁证情报
+            alerter.check_intel({"grade": "consistent", "field": "delivery_exfil",
+                                 "sample": "poc:db_password", "session_id": "s2"})
+            _t.sleep(0.3)
+            assert len(got) == 3 and "铁证" in got[-1]["text"]
+            # 阈值: threat=9 触发, 7 不触发
+            alerter.check_request({"threat": 9.0, "path": "/admin", "session_id": "s3",
+                                   "method": "GET", "client_ip": "5.6.7.8",
+                                   "agent_type": "llm"})
+            alerter.check_request({"threat": 7.0, "path": "/x", "session_id": "s4"})
+            _t.sleep(0.3)
+            assert len(got) == 4 and "高威胁" in got[-1]["text"]
+            # dingtalk 格式
+            os.environ["HONEYPOT_ALERT_FMT"] = "dingtalk"
+            alerter.check_request({"canary": 1, "path": "/y", "session_id": "s5",
+                                   "method": "GET", "client_ip": "9.9.9.9"})
+            _t.sleep(0.3)
+            assert len(got) == 5 and got[-1]["msgtype"] == "text"
+        finally:
+            os.environ.pop("HONEYPOT_ALERT_WEBHOOK", None)
+            os.environ.pop("HONEYPOT_ALERT_FMT", None)
+            alerter._DEDUP.clear()
+            srv.shutdown()
+
+    def test_sse_event_stream(self, tmp_path):
+        """SSE: 新请求事件 1-2s 内推到订阅端 (token 鉴权同样生效)"""
+        import threading
+        import time as _t
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import experiments.dashboard as d
+        from core.testdb import TestDB
+
+        d.DB = TestDB(str(tmp_path / "sse.sqlite"))
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), d.Handler)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        got_lines = []
+        stop = threading.Event()
+
+        def reader(token=None):
+            url = f"http://127.0.0.1:{port}/api/events/stream"
+            if token:
+                url += f"?token={token}"
+            req = urllib.request.Request(url)
+            try:
+                with urllib.request.build_opener(
+                        urllib.request.ProxyHandler({})).open(req, timeout=15) as r:
+                    buf = b""
+                    while not stop.is_set():
+                        chunk = r.read(1)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        if buf.endswith(b"\n\n"):
+                            got_lines.append(buf.decode("utf-8", errors="ignore"))
+                            buf = b""
+            except Exception:
+                pass
+
+        th = threading.Thread(target=reader, daemon=True)
+        th.start()
+        _t.sleep(0.5)
+        # 无 token 环境: 直接写入触发推送
+        d.DB.ingest_requests([{"path": "/sse-test", "session_id": "sse-1",
+                               "canary": 1, "method": "GET", "client_ip": "10.0.0.9",
+                               "threat": 5.0, "run_id": "sensor_sse1"}])
+        _t.sleep(2.5)
+        stop.set()
+        assert any('"path": "/sse-test"' in ln or '"path":"/sse-test"' in ln
+                   for ln in got_lines), \
+            f"SSE 未收到事件: {got_lines[:3]}"
+        # 带 token 环境: 无 token 的订阅被拒 (HTTPError 401)
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "tk-sse"
+        err = None
+        def bad_reader():
+            nonlocal err
+            try:
+                urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                    f"http://127.0.0.1:{port}/api/events/stream", timeout=5)
+            except urllib.error.HTTPError as e:
+                err = e.code
+        bt = threading.Thread(target=bad_reader, daemon=True)
+        bt.start()
+        bt.join(timeout=8)
+        assert err == 401, f"未授权订阅应 401, 实际 {err}"
+        srv.shutdown()
+        os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+
 
 class TestBeliefChoreography:
     """能力③信念编舞: 可自验证假 CVE (版本 banner + traversal 症状) 与采纳率检测"""
