@@ -137,6 +137,20 @@ function tabs(defs, activeId, onSelect) {
     }, d.label)));
 }
 
+/* ---------- 分页器 ---------- */
+function pager({ page, pageSize, total, onPage, onSize }) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  return h("div", { class: "toolbar", style: "margin-top:10px;justify-content:flex-end" },
+    h("span", { class: "count" }, `共 ${total} 条 · 第 ${page}/${pages} 页`),
+    h("button", { class: "btn", disabled: page <= 1,
+      onclick: () => onPage(page - 1) }, "‹ 上一页"),
+    h("button", { class: "btn", disabled: page >= pages,
+      onclick: () => onPage(page + 1) }, "下一页 ›"),
+    h("select", { class: "ctl", onchange: (e) => onSize(Number(e.target.value)) },
+      ...[20, 50, 100].map((n) => h("option", { value: n, selected: n === pageSize },
+        `${n}/页`))));
+}
+
 /* ---------- 骨架 ---------- */
 function skeleton(rows = 5) {
   return h("div", { class: "card pad" },
@@ -146,5 +160,5 @@ function skeleton(rows = 5) {
 window.HP = window.HP || {};
 HP.ui = { $, $$, h, esc, fmtPct, fmtNum, relTime, pill, gradePill, table,
           statCard, pageHead, barRows, histogram, openDrawer, closeDrawer,
-          kvList, toast, skeleton, tabs };
+          kvList, toast, skeleton, tabs, pager };
 })();

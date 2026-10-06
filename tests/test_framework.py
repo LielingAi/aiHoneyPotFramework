@@ -2059,8 +2059,9 @@ class TestProductP2:
                 assert json.loads(r.read())["beacons"] == 1
             with op.open(urllib.request.Request(url + "/api/beacons?token=m-tok"),
                          timeout=5) as r:
-                rows = json.loads(r.read())
-            assert rows[0]["sensor_id"] == "edge-2" and rows[0]["source_ip"] == "7.7.7.7"
+                data = json.loads(r.read())
+            assert data["total"] == 1
+            assert data["rows"][0]["sensor_id"] == "edge-2" and data["rows"][0]["source_ip"] == "7.7.7.7"
         finally:
             os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
             srv.shutdown()

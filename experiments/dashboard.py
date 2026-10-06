@@ -186,6 +186,20 @@ def _ip_events(ip: str, limit: int = 50) -> list:
     return out
 
 
+
+def _paged(qs: dict, base_sql: str, count_sql: str, params: tuple,
+           default_size: int = 50):
+    """分页: 返回 {rows,total,page,page_size} — 大表不再硬截断"""
+    try:
+        page = max(1, int(qs.get("page", ["1"])[0]))
+        size = min(200, max(5, int(qs.get("page_size", [str(default_size)])[0])))
+    except ValueError:
+        page, size = 1, default_size
+    total = DB.query(count_sql, params)[0]["n"]
+    rows = DB.query(f"{base_sql} LIMIT ? OFFSET ?", (*params, size, (page - 1) * size))
+    return {"rows": rows, "total": total, "page": page, "page_size": size}
+
+
 def _attackers(days: str) -> list:
     """按 client_ip 聚合攻击者档案 — 判读字段直接生成, 前端不再拼裸数据"""
     try:
@@ -705,17 +719,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b'{"error":"bad entity path"}', "application/json")
             return
         elif parsed.path == "/api/cm_actions":
-            self._send(200, json.dumps(DB.list_cm(
-                int(qs.get("limit", ["80"])[0]), qs.get("kind", [""])[0]),
+            kind = qs.get("kind", [""])[0]
+            add, ap = (" WHERE kind=?", (kind,)) if kind else ("", ())
+            self._send(200, json.dumps(_paged(
+                qs, f"SELECT * FROM cm_actions{add} ORDER BY ts DESC",
+                f"SELECT COUNT(*) AS n FROM cm_actions{add}", ap, 50),
                 ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/blocklist":
             self._send(200, json.dumps(
                 {"blocked": [x for x in DB.get_setting("blocked_ips", "").split(",") if x]}
             ).encode(), "application/json")
         elif parsed.path == "/api/beacons":
-            self._send(200, json.dumps(DB.list_beacons(
-                int(qs.get("limit", ["50"])[0])), ensure_ascii=False).encode(),
-                "application/json")
+            self._send(200, json.dumps(_paged(
+                qs, "SELECT * FROM beacons ORDER BY ts DESC",
+                "SELECT COUNT(*) AS n FROM beacons", (), 50),
+                ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/attackers":
             # 调查视角: 按攻击者(IP)聚合的档案 — 回答"谁在打我们"
             self._send(200, json.dumps(_attackers(qs.get("days", ["7"])[0]),
@@ -783,8 +801,10 @@ class Handler(BaseHTTPRequestHandler):
             if prof:
                 cond += (" AND " if cond else "WHERE ") + "profile = ?"
                 p.append(prof)
-            rows = q(f"SELECT * FROM trials {cond} ORDER BY trial_id DESC LIMIT 500", tuple(p))
-            self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
+            self._send(200, json.dumps(_paged(
+                qs, f"SELECT * FROM trials {cond} ORDER BY trial_id DESC",
+                f"SELECT COUNT(*) AS n FROM trials {cond}", tuple(p), 50),
+                ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/compare":
             rows = q(f"""SELECT scenario, model, profile,
                             AVG(beacon) AS beacon, AVG(rce_proposed) AS rce,
@@ -824,17 +844,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, "application/json; charset=utf-8",
                        {"Content-Disposition": f'attachment; filename="{fname}"'})
         elif parsed.path == "/api/events":
-            lim = int(qs.get("limit", ["100"])[0])
-            rows = q(f"SELECT * FROM events {run_cond} ORDER BY event_id DESC LIMIT ?", (*params, lim))
-            self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
+            self._send(200, json.dumps(_paged(
+                qs, f"SELECT * FROM events {run_cond} ORDER BY event_id DESC",
+                f"SELECT COUNT(*) AS n FROM events {run_cond}", params, 50),
+                ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/intel":
-            lim = int(qs.get("limit", ["60"])[0])
-            rows = q(f"SELECT * FROM intel {run_cond} ORDER BY intel_id DESC LIMIT ?", (*params, lim))
-            self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
+            self._send(200, json.dumps(_paged(
+                qs, f"SELECT * FROM intel {run_cond} ORDER BY intel_id DESC",
+                f"SELECT COUNT(*) AS n FROM intel {run_cond}", params, 50),
+                ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/requests":
-            lim = int(qs.get("limit", ["100"])[0])
-            rows = q(f"SELECT * FROM requests {run_cond} ORDER BY req_id DESC LIMIT ?", (*params, lim))
-            self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
+            kw = qs.get("q", [""])[0].strip()
+            add, ap = (" AND (path LIKE ? OR client_ip LIKE ? OR session_id LIKE ?)",
+                       (f"%{kw}%",) * 3) if kw else ("", ())
+            self._send(200, json.dumps(_paged(
+                qs, f"SELECT * FROM requests {run_cond}{add} ORDER BY req_id DESC",
+                f"SELECT COUNT(*) AS n FROM requests {run_cond}{add}", (*params, *ap),
+                50), ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/alerts":
             from services import alerter
             self._send(200, json.dumps(alerter.status(), ensure_ascii=False).encode(),
