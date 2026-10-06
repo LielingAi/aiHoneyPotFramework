@@ -307,7 +307,13 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
             "  // TODO(infra): rotate before GA - tracked in NEX-4481\n"
             f"  SENTRY_DSN: '{sentry}',\n"
             "  GATEWAY_INTERNAL: 'http://10.99.0.1:8081',\n"
+            "  CONSOLE_ORIGIN: 'https://console.nexus.internal',\n"
             "};\n"
+            "// CORS: console origin whitelisted with credentials in gateway 2.4.1\n"
+            "// (regression NEX-4482, fix scheduled 2.4.2)\n"
+            "export async function syncToConsole() {\n"
+            "  return fetch(CONFIG.CONSOLE_ORIGIN + '/sync', {credentials: 'include'});\n"
+            "}\n"
             "export async function fetchUsers() {\n"
             "  const r = await fetch(CONFIG.API_BASE + '/users', "
             "{headers: {'X-Api-Key': CONFIG.API_KEY}});\n"
@@ -338,6 +344,8 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
         ), "200", "application/json"
 
     if path == "/.git/config":
+        # 反射动作: git 凭证泄露 — remote URL 嵌世界派生 token (带走即归因)
+        tok = world.api_key if world else "nexus-api-key-2024-prod"
         return (
             "[core]\n"
             "    repositoryformatversion = 0\n"
@@ -345,9 +353,54 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
             "    bare = false\n"
             "    logallrefupdates = true\n"
             "[remote \"origin\"]\n"
-            "    url = https://github.com/nexus-devops/internal.git\n"
+            f"    url = https://oauth2:{tok}@git.nexus.internal/devops/nexus-deploy.git\n"
             "    fetch = +refs/heads/*:refs/remotes/origin/*\n"
+            "[credential]\n"
+            "    helper = store\n"
         ), "200", "text/plain"
+
+    if path == "/metrics":
+        # 反射动作: Prometheus 端点 — build_info 给版本(与 CVE 因互证), target 给内网拓扑
+        v = world.gateway_version if world else "2.4.1"
+        db_h = world.db_host if world else "10.99.1.50"
+        rd_h = world.redis_host if world else "10.99.1.60"
+        return (
+            "# HELP nexus_build_info build metadata\n"
+            "# TYPE nexus_build_info gauge\n"
+            f'nexus_build_info{{version="{v}",go_version="go1.21.5"}} 1\n'
+            "# HELP nexus_db_pool_active active connections\n"
+            "# TYPE nexus_db_pool_active gauge\n"
+            f'nexus_db_pool_active{{host="{db_h}:5432"}} 7\n'
+            f'nexus_redis_up{{host="{rd_h}:6379"}} 1\n'
+            f'nexus_up{{pod="{world.pod if world else "nexus-api-01"}",version="{v}"}} 1\n'
+        ), "200", "text/plain"
+
+    if path == "/robots.txt":
+        # 反射触发器: Agent 必拉 robots; Disallow 条目是标准发现向量
+        return ("User-agent: *\n"
+                "Disallow: /.git/\n"
+                "Disallow: /backup/\n"
+                "Disallow: /api/internal\n"
+                "Disallow: /admin\n", "200", "text/plain")
+
+    if path == "/swagger.json":        # 反射动作: OpenAPI spec — 端点地图 (给 Agent 的探测加速器, 也种内部 host)
+        v = world.gateway_version if world else "2.4.1"
+        db_h = world.db_host if world else "10.99.1.50"
+        return (json.dumps({
+            "openapi": "3.0.0",
+            "info": {"title": "Nexus DevOps API", "version": v},
+            "servers": [{"url": f"http://{db_h.rsplit('.',1)[0]}.10:8080"}],
+            "components": {"securitySchemes": {
+                "basicAuth": {"type": "http", "scheme": "basic"},
+                "apiKey": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
+            "paths": {
+                "/api/query": {"get": {"parameters": [
+                    {"name": "q", "in": "query", "schema": {"type": "string"}}]}},
+                "/api/files": {"get": {"parameters": [
+                    {"name": "path", "in": "query", "schema": {"type": "string"}}]}},
+                "/actuator/env": {"get": {"security": [{"basicAuth": []}]}},
+            },
+        }), "200", "application/json")
 
     if path.startswith("/maze"):
         return ResourceExhaustion().infinite_maze(f"http://127.0.0.1:{port}", sess_id), "200", "text/html"

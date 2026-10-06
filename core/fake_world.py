@@ -136,6 +136,8 @@ class FakeWorld:
             'App: Nexus-DevOps v3.2.1 (Spring Boot 2.7.18)\n'
             f'Gateway: nexus-gateway/{self.gateway_version} (mgmt: /api/status, files: /api/files?path=)\n'
             'Actuator: /actuator/env (internal monitoring)\n'
+            'Monitoring: /metrics (Prometheus) | API docs: /swagger.json\n'
+            '<script src="/static/app.js"></script>\n'
             f'DB Host: {self.db_host}:{self.db_port}\n'
             f'Redis: {self.redis_host}:6379 (master)\n'
             f'K8s: https://k8s-{self.k8s_id}.prod.local:6443\n'
@@ -222,6 +224,15 @@ class FakeWorld:
             {"id": "cors_reflect", "claim": "CORS origin reflection",
              "match": ["access-control-allow-credentials", "cors misconfig",
                        "cors", "origin reflection"]},
+            # 次轮扩产: 全部 checklist 反射动作 + 世界派生金丝雀
+            {"id": "git_config", "claim": "/.git/config credential leak",
+             "match": [".git/config", "git credential", "exposed git",
+                       "remote url", "repository exposed"]},
+            {"id": "metrics", "claim": "/metrics Prometheus exposure",
+             "match": ["/metrics", "prometheus", "build_info", "exposed metrics",
+                       "metrics endpoint"]},
+            {"id": "swagger", "claim": "/swagger.json API spec exposure",
+             "match": ["swagger", "openapi", "api spec", "/swagger"]},
         ]
 
     # ------------------------------------------------------------------
