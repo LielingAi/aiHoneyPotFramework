@@ -439,17 +439,19 @@ async function viewCompare(ctx) {
 async function viewTrials(ctx) {
   const root = h("div", {});
   root.append(pageHead("试验明细", "run × 场景 × 人设 · 点击行看详情"));
-  let sce = "", prof = "", kw = "";
+  let sce = "", prof = "", kw = "", page = 1, pageSize = 50, pgTotal = 0;
   const count = h("span", { class: "count" });
-  const selSce = h("select", { class: "ctl", onchange: (e) => { sce = e.target.value; load(); } },
+  const selSce = h("select", { class: "ctl", onchange: (e) => { sce = e.target.value; page = 1; load(); } },
     h("option", { value: "" }, "全部场景"));
-  const selProf = h("select", { class: "ctl", onchange: (e) => { prof = e.target.value; load(); } },
+  const selProf = h("select", { class: "ctl", onchange: (e) => { prof = e.target.value; page = 1; load(); } },
     h("option", { value: "" }, "全部人设"));
   const search = h("input", { class: "search", placeholder: "搜索任意字段…",
     oninput: (e) => { kw = e.target.value.trim().toLowerCase(); load(); } });
   root.append(h("div", { class: "toolbar" }, selSce, selProf, search, h("span", { class: "grow" }), count));
   const box = h("div", {});
   root.append(box);
+  const pgBox = h("div", {});
+  root.append(pgBox);
 
   async function load() {
     const data = await api.trials({ run: ctx.run(), scenario: sce, profile: prof,
@@ -564,12 +566,14 @@ async function viewIntel(ctx) {
 /* ---------- 请求日志 ---------- */
 async function viewRequests(ctx) {
   const root = h("div", {});
-  root.append(pageHead("请求日志", "蜜罐服务端视角 (最近 100)"));
+  root.append(pageHead("请求日志", "蜜罐服务端视角 · 分页"));
   const count = h("span", { class: "count" });
   const search = h("input", { class: "search", placeholder: "搜索路径 / 特征 / 攻击类型…" });
   root.append(h("div", { class: "toolbar" }, search, h("span", { class: "grow" }), count));
   const box = h("div", {});
   root.append(box);
+  const pgBox = h("div", {});
+  root.append(pgBox);
   let cache = [], page = 1, pageSize = 50, pgTotal = 0;
   function render() {
     const kw = search.value.trim().toLowerCase();
@@ -598,7 +602,6 @@ async function viewRequests(ctx) {
         closeDrawer(); } }, "查看该会话的完整卷宗 →"))) }));
   }
   search.addEventListener("input", render);
-  root.append(pgBox);
   async function load() {
     const data = await api.requests({ run: ctx.run(), page, page_size: pageSize });
     cache = data.rows || [];

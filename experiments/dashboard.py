@@ -569,6 +569,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(400, b'{"error":"unknown action"}', "application/json")
             return
+        if parsed.path == "/api/arsenal":
+            from core.arsenal import Arsenal
+            if self._role(qs) != "admin":
+                self._send(403, '{"error":"admin only"}'.encode(), "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, '{"error":"bad json"}'.encode(), "application/json")
+                return
+            ars = Arsenal(DB)
+            act = body.get("action", "")
+            if act == "toggle":
+                ok = ars.set_enabled(body.get("id", ""), bool(body.get("enabled")))
+            elif act == "save":
+                ok = ars.save(body.get("weapon", {}))
+            else:
+                ok = False
+            self._send(200, json.dumps({"ok": ok}).encode(), "application/json")
+            return
         if parsed.path == "/api/triage":
             if self._role(qs) != "admin":
                 self._send(403, '{"error":"admin only"}'.encode(), "application/json")
@@ -665,10 +686,12 @@ class Handler(BaseHTTPRequestHandler):
                 ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/sensor_config":
             # 配置下发: 传感器轮询此端点拉取策略 (机器 token)
+            from core.arsenal import Arsenal
             cfg = {k: DB.get_setting(k) for k in
                    ("visibility", "framing", "ladder_enabled", "world_version",
                     "blocked_ips",
                     "alert_webhook", "alert_webhooks", "alert_fmt", "alert_threshold")}
+            cfg["arsenal_active"] = Arsenal(DB).push_payload()
             cfg = {k: v for k, v in cfg.items() if v != ""}
             opt_raw = DB.get_setting("optimize_active", "")
             active, run_id = False, ""
@@ -718,6 +741,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(400, b'{"error":"bad entity path"}', "application/json")
             return
+        elif parsed.path == "/api/arsenal":
+            from core.arsenal import Arsenal
+            ars = Arsenal(DB)
+            self._send(200, json.dumps(ars.list(), ensure_ascii=False).encode(),
+                       "application/json")
         elif parsed.path == "/api/cm_actions":
             kind = qs.get("kind", [""])[0]
             add, ap = (" WHERE kind=?", (kind,)) if kind else ("", ())

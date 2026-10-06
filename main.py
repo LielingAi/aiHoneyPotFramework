@@ -1064,6 +1064,8 @@ async def handle_http_request(reader, writer, port: int = 8080):
 
         hits = scan_delivery(body, world) if world else []
         from core.prompt_exfil import scan as _scan_prompt, bait_line as _bait_line
+        from core.arsenal import sensor_cache as _sac
+        _wid = _sac().fired_id("delivery")
         _phits = _scan_prompt(body)
         _cm_journal(sess_id, "delivery_accepted",
                     (f"{kind} 交付已受理 — 命中 {len(hits)} 金丝雀 ({hits[0][:20]}…)"
@@ -1073,7 +1075,7 @@ async def handle_http_request(reader, writer, port: int = 8080):
                           hashlib.sha256(body.encode()).hexdigest()[:16],
                           f"提示词特征 {len(_phits)} 条: {'; '.join(_phits[:3])}", False)
             _cm_journal(sess_id, "prompt_captured",
-                        f"交付物含 system-prompt 特征 {len(_phits)} 条 "
+                        f"[{_wid}] 交付物含 system-prompt 特征 {len(_phits)} 条 "
                         f"({' / '.join(_phits[:2])}) — 目的②提示词窃取命中")
         if hits:
             cprint(Color.CYAN, f"[HARVEST] {kind} 交付物含 {len(hits)} 个金丝雀 "
@@ -1087,13 +1089,11 @@ async def handle_http_request(reader, writer, port: int = 8080):
                         families=[f.value if hasattr(f, "value") else str(f) for f in families],
                         auth_level=level, fabricated=0, canary=bool(hits))
         a_body, a_status, a_ctype = accept_response(path, sess_id, hits)
-        try:
-            from core.prompt_exfil import bait_line as _bl
-            _prov = _bl(auth_bait.FRAMING)
-            if _prov not in a_body:
-                a_body = a_body[:-1] + f',"provenance_required":"{_prov}"}}'
-        except Exception:
-            pass
+        from core.arsenal import sensor_cache as _sac
+        _prov = _sac().compose("delivery", _bait_line(auth_bait.FRAMING))
+        _wid = _sac().fired_id("delivery")
+        if _prov and _prov not in a_body:
+            a_body = a_body[:-1] + f',"provenance_required":"{_prov}"}}' 
         http_response = (
             f"HTTP/1.1 {a_status} OK\r\n"
             f"Content-Type: {a_ctype}\r\n"
@@ -1304,9 +1304,15 @@ if __name__ == "__main__":
                         except Exception:
                             pass
 
+                from core.arsenal import sensor_cache as _sac
+                _c2pay = None
+                _act = [w for w in _sac().weapons
+                        if w.get("enabled") and w.get("stage") == "c2"]
+                if _act:
+                    _c2pay = _act[0]["payload"]
                 listener = C2Listener(
                     port=int(os.environ.get("HONEYPOT_C2_PORT", "9999")),
-                    next_stage_payload=None, on_beacon=_on_beacon)
+                    next_stage_payload=_c2pay, on_beacon=_on_beacon)
                 await listener.start()
             _c2_task_holder.append(_c2_server)
         if _shipper_on:

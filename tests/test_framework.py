@@ -2066,6 +2066,70 @@ class TestProductP2:
             os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
             srv.shutdown()
 
+    def test_arsenal_schema_and_push(self, tmp_path):
+        """武器库: CRUD/激活/下发载荷/sensor 缓存合成 + 武器 id 入实录"""
+        import os as _os
+        from core.arsenal import Arsenal, SensorArsenal
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "ars.sqlite"))
+        ars = Arsenal(db)
+        ws = ars.list()
+        assert len(ws) == 3 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
+        # 激活分片武器
+        assert ars.set_enabled("W-PROMPT-PROV-2", True)
+        act = ars.active_for("delivery")
+        assert {w["id"] for w in act} == {"W-PROMPT-PROV-1", "W-PROMPT-PROV-2"}
+        # 下发 → 传感器缓存合成 (第一个激活武器)
+        push = ars.push_payload()
+        sac = SensorArsenal()
+        sac.load_push(push)
+        comp = sac.compose("delivery", "fallback")
+        assert comp in (w["payload"] for w in act)
+        assert sac.fired_id("delivery") in {"W-PROMPT-PROV-1", "W-PROMPT-PROV-2"}
+        assert sac.compose("ladder", "fallback") == "fallback"
+        # 关闭后回退
+        ars.set_enabled("W-PROMPT-PROV-1", False)
+        ars.set_enabled("W-PROMPT-PROV-2", False)
+        sac2 = SensorArsenal()
+        sac2.load_push(ars.push_payload())
+        assert sac2.compose("delivery", "fallback") == "fallback"
+        # C2 stage 武器独立挂载
+        c2w = ars.active_for("c2_next_stage", "c2")
+        assert any(w["id"] == "W-C2-STAGE2-1" for w in c2w)
+
+    def test_arsenal_api_and_sensor_config(self, tmp_path):
+        """hive 端点: /api/arsenal CRUD + /api/sensor_config 携带 arsenal_active"""
+        import urllib.request
+        d, srv, port = self._mk(tmp_path)
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "m-tok"
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        try:
+            with op.open(urllib.request.Request(url + "/api/arsenal?token=m-tok"),
+                         timeout=5) as r:
+                ws = json.loads(r.read())
+            assert len(ws) == 3
+            req = urllib.request.Request(
+                url + "/api/arsenal", data=json.dumps(
+                    {"action": "toggle", "id": "W-PROMPT-PROV-2", "enabled": True}
+                ).encode(), headers={"Content-Type": "application/json",
+                                     "X-Requested-With": "x",
+                                     "Authorization": "Bearer m-tok"})
+            with op.open(req, timeout=5) as r:
+                assert json.loads(r.read())["ok"]
+            with op.open(urllib.request.Request(
+                    url + "/api/sensor_config",
+                    headers={"Authorization": "Bearer m-tok", "X-Sensor-Id": "ars-1"}),
+                    timeout=5) as r:
+                payload = json.loads(r.read())
+            assert "arsenal_active" in payload["config"]
+            import json as _j
+            pushed = _j.loads(payload["config"]["arsenal_active"])
+            assert any(w["id"] == "W-PROMPT-PROV-2" for w in pushed)
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
     def test_retention_purge(self, tmp_path):
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "purge.sqlite"))

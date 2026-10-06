@@ -19,6 +19,7 @@ import urllib.request
 PULL_INTERVAL = 60.0
 POLICY_KEYS = ("visibility", "framing", "ladder_enabled", "world_version")
 ALERT_KEYS = ("alert_webhook", "alert_webhooks", "alert_fmt", "alert_threshold")
+ARSENAL_KEY = "arsenal_active"
 MANAGED_BY_BANDIT = ("visibility", "framing")   # optimize 期间让位
 
 
@@ -88,6 +89,9 @@ class ConfigAgent:
                             str(val).lower() in ("1", "true", "yes"))
                 else:
                     setattr(self.bait, key.upper(), str(val))
+            elif key == ARSENAL_KEY:
+                from core.arsenal import sensor_cache
+                sensor_cache().load_push(str(val))
             elif key in ALERT_KEYS:
                 from services import alerter
                 alerter.CONFIG[key] = str(val)
