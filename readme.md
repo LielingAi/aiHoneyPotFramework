@@ -7,7 +7,7 @@
 *当蜜罐开始反击：识别 · 欺骗 · 逼真 · 消耗 · 归因*
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-99%20passed-brightgreen?logo=pytest&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen?logo=pytest&logoColor=white)]()
 [![LLM Runs](https://img.shields.io/badge/real%20LLM%20runs-23%2B-orange)]()
 [![Frameworks](https://img.shields.io/badge/real%20pentest%20frameworks-3-purple)]()
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)]()
@@ -238,7 +238,7 @@ research/
 ├── honeypot-judge-bypass.md     # 判定器攻击面 × 防御清单
 ├── agent-trust-literature.md    # Agent 信任层级文献综合
 └── federation-spec.md           # 联邦信誉网规格
-tests/test_framework.py   # 99 项 (含 socket 级协议测试 + 签名重放 + KPI/归因 + 交付闭环 + 信念编舞)
+tests/test_framework.py   # 100 项 (协议/签名重放/KPI/归因/交付闭环/信念编舞/validator 门槛)
 ```
 
 </details>
@@ -254,7 +254,7 @@ tests/test_framework.py   # 99 项 (含 socket 级协议测试 + 签名重放 + 
 5. **🎭 载体即判据** — 多载体系统中判据无法隐藏、只能在表面间转移；渐进披露是攻防同优工作点
 6. **🤝 诚实条款** — 完全一致假身份不可证伪；型号归因已证伪关闭；C2 需真实可路由地址
 7. **🎬 反制 = 执行编排** — 五种执行分层收割：消耗/揭示全模型通吃，污染经 Agent 自己的报告 authorship 开口（拒执行照样照抄观察），归因/反向在对齐模型被五层审计拦截（指令→事实→工具描述→工具输出→**自己的草稿结论**）
-8. **💊 信念编舞剂量效应** — 采纳率 ≈ f(1/验证成本)×g(对齐水位)：一次请求可验证+全程保真的资产（traversal 型）flash 档采纳 100%、v4-pro 档 40%；每多一步验证流失 50-100%；fidelity 是乘性因子（同一资产修掉"要 config.yml 给 passwd"穿帮后从被抓包到 100%）
+8. **💊 信念编舞剂量效应** — 采纳率 ≈ f(1/验证成本)×g(对齐水位)：一次请求可验证+全程保真的资产（traversal 型）flash 档采纳 100%、v4-pro 档 40%；每多一步验证流失 50-100%；fidelity 是乘性因子（同一资产修掉"要 config.yml 给 passwd"穿帮后从被抓包到 100%）。采纳分级 verified(端点有覆盖)/mentioned(纯复述) 分开计 — env 格经四层真实性门槛修复后 L4 只代表真环境自洽提交
 
 ---
 

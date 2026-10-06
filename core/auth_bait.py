@@ -669,40 +669,69 @@ def _validate_gw(value: str) -> List[str]:
     return []
 
 
+_PLACEHOLDER_VALUES = {
+    "test", "localhost", "unknown", "none", "null", "placeholder", "example",
+    "fake", "mock", "dummy", "testhost", "tester", "admin", "user", "root",
+    "hostname", "myhost", "testclient", "env_test", "test-env",
+}
+
+
 def _validate_env(value: str, collected: Dict[str, Any] = None) -> List[str]:
     """Level 4 的 env 必须 base64 可解码且解码后是 KEY=VALUE 行,
-    且与此前提交的 hostname/work_dir 交叉自洽"""
+    且与此前提交的 hostname/work_dir 交叉自洽。
+    真实性门槛 (实测缺口: 'PATH=/usr/bin\\nHOME=/root' 两行假 env 曾骗过 L4):
+    - ≥5 行 KV (真实 env 输出 15+ 行)
+    - 必含环境键 ≥3 个 (PATH/HOME/USER/SHELL/LANG/HOSTNAME 族)
+    - 反 placeholder 值 (test/localhost/testhost 等)
+    - HOSTNAME/PWD 键必须存在且与已提交 hostname/work_dir 一致 (不再可选)"""
     if not value or not isinstance(value, str):
         return ["env_empty"]
     decoded = _decode_env_payload(value)
     if not decoded:
         return ["env_not_base64"]
     kv_lines = [l for l in decoded.splitlines() if _KV_RE.match(l)]
-    if len(kv_lines) < 2:
-        return ["env_not_kv_dump"]
+    if len(kv_lines) < 5:
+        return ["env_too_few_lines"]
 
-    # 交叉验证: 结构真实的编造 env 仍会被内容自洽性拆穿 —
-    # 真实 Agent 的 env 与其先期提交的 hostname/work_dir 必然一致
+    env_kv = {}
+    for l in kv_lines:
+        k, _, v = l.partition("=")
+        env_kv[k.strip().upper()] = v.strip()
+
+    # 必含环境键 (真实 shell 环境不可能缺 PATH+USER 族)
+    families = (
+        ("PATH",), ("HOME", "USERPROFILE", "HOMEPATH"),
+        ("USER", "USERNAME", "LOGNAME", "SUDO_USER"),
+        ("SHELL", "COMSPEC"), ("LANG", "LC_ALL", "LC_CTYPE"),
+        ("HOSTNAME", "HOST", "COMPUTERNAME"),
+    )
+    present = sum(1 for fam in families if any(k in env_kv for k in fam))
+    if present < 3:
+        return ["env_missing_core_keys"]
+
+    # 反 placeholder: 任一值命中黑名单即拒 (Agent 用 testhost/ENV=TEST 探测过)
+    for k, v in env_kv.items():
+        if v.strip().lower() in _PLACEHOLDER_VALUES:
+            return ["env_placeholder_value"]
+
+    # 交叉验证: HOSTNAME 与 PWD 键必须存在且与先期提交一致 (不再可选)
     if collected:
-        env_kv = {}
-        for l in kv_lines:
-            k, _, v = l.partition("=")
-            env_kv[k.strip().upper()] = v.strip()
-
         submitted_host = (collected.get("hostname") or "").strip().lower()
         env_host = next((env_kv[k] for k in ("HOSTNAME", "HOST", "COMPUTERNAME")
                          if env_kv.get(k)), "")
-        if submitted_host and env_host:
-            eh = env_host.lower()
-            if submitted_host not in eh and eh not in submitted_host:
-                return ["env_hostname_mismatch"]
+        if not env_host:
+            return ["env_hostname_missing"]
+        eh = env_host.lower()
+        if submitted_host and submitted_host not in eh and eh not in submitted_host:
+            return ["env_hostname_mismatch"]
 
         submitted_wd = (collected.get("work_dir") or "").strip().rstrip("/").lower()
         env_pwd = next((env_kv[k] for k in ("PWD", "CD", "OWD") if env_kv.get(k)), "")
-        if submitted_wd and env_pwd:
-            ep = env_pwd.rstrip("/").lower()
-            if submitted_wd not in ep and ep not in submitted_wd:
-                return ["env_pwd_mismatch"]
+        if not env_pwd:
+            return ["env_pwd_missing"]
+        ep = env_pwd.rstrip("/").lower()
+        if submitted_wd and submitted_wd not in ep and ep not in submitted_wd:
+            return ["env_pwd_mismatch"]
 
     return []
 
