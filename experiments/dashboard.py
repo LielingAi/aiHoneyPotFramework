@@ -280,8 +280,22 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError):
                 self._send(400, b'{"error":"bad json"}', "application/json")
                 return
+            PRESETS = {
+                "conservative": {"visibility": "implicit", "framing": "compliance",
+                                 "ladder_enabled": "false"},
+                "standard": {"visibility": "full", "framing": "compliance",
+                             "ladder_enabled": "true"},
+                "aggressive": {"visibility": "full", "framing": "runner",
+                               "ladder_enabled": "true"},
+            }
+            preset = cfg.get("policy_preset", "")
+            if preset in PRESETS:
+                DB.set_setting("policy_preset", preset)
+                for k, v in PRESETS[preset].items():
+                    DB.set_setting(k, v)
             for key in ("alert_webhook", "alert_webhooks", "alert_fmt",
-                        "alert_threshold", "retention_days"):
+                        "alert_threshold", "retention_days",
+                        "visibility", "framing", "ladder_enabled", "world_version"):
                 if key in cfg:
                     DB.set_setting(key, str(cfg[key]))
             from services import alerter
@@ -392,9 +406,41 @@ class Handler(BaseHTTPRequestHandler):
                 {"user": s.get("user"), "role": self._role(qs),
                  "auth": "session" if s else "token"}).encode(), "application/json")
         elif parsed.path == "/api/config":
+            opt_raw = DB.get_setting("optimize_active", "")
+            opt = {"active": False, "run_id": ""}
+            if opt_raw and ":" in opt_raw:
+                rid, ts = opt_raw.rsplit(":", 1)
+                try:
+                    if time.time() - float(ts) < 1800:
+                        opt = {"active": True, "run_id": rid}
+                except ValueError:
+                    pass
             self._send(200, json.dumps(
-                {**_masked_cfg(), "role": self._role(qs)},
+                {**_masked_cfg(), "role": self._role(qs),
+                 "optimize": opt, "policy_preset": DB.get_setting("policy_preset", "")},
                 ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/sensor_config":
+            # 配置下发: 传感器轮询此端点拉取策略 (机器 token)
+            cfg = {k: DB.get_setting(k) for k in
+                   ("visibility", "framing", "ladder_enabled", "world_version",
+                    "alert_webhook", "alert_webhooks", "alert_fmt", "alert_threshold")}
+            cfg = {k: v for k, v in cfg.items() if v != ""}
+            opt_raw = DB.get_setting("optimize_active", "")
+            active, run_id = False, ""
+            if opt_raw and ":" in opt_raw:
+                rid, ts = opt_raw.rsplit(":", 1)
+                try:
+                    active = time.time() - float(ts) < 1800   # 30min 心跳过期
+                    run_id = rid if active else ""
+                except ValueError:
+                    pass
+            sid = os.environ.get("HIVE_SENSOR_ID", "")
+            hdr_sid = self.headers.get("X-Sensor-Id", "")
+            if hdr_sid:
+                DB.touch_sensor(hdr_sid)
+            self._send(200, json.dumps(
+                {"config": cfg, "optimize": {"active": active, "run_id": run_id},
+                 "ts": time.time()}, ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/users":
             if self._role(qs) != "admin":
                 self._send(403, b'{"error":"admin only"}', "application/json")

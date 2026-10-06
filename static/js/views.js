@@ -173,8 +173,9 @@ async function viewConfig() {
   root.append(pageHead("配置", "告警渠道 · 数据保留 · 账户"));
 
   const alertCard = h("div", { class: "card pad", style: "max-width:680px" });
+  const policyCard = h("div", { class: "card pad", style: "max-width:680px;margin-top:16px" });
   const userCard = h("div", { class: "card pad", style: "max-width:680px;margin-top:16px" });
-  root.append(alertCard, userCard);
+  root.append(alertCard, policyCard, userCard);
 
   async function load() {
     const c = await api.config();
@@ -219,6 +220,48 @@ async function viewConfig() {
             const r = await api.testAlert();
             toast(r.sent ? "测试告警已发送 (至少一个渠道成功)" : "未发送 (请检查 webhook)");
           } catch (e) { toast("发送失败: " + e.message, "err"); } } }, "发送测试告警")));
+
+    /* ---- 诱饵策略 (下发到全部传感器, 60s 内生效) ---- */
+    policyCard.innerHTML = "";
+    policyCard.append(h("div", { class: "t muted" },
+      "诱饵策略 — 在线传感器 60s 内拉取生效"));
+    if (c.optimize?.active) {
+      policyCard.append(h("div", { class: "banner warn" },
+        `演化实验进行中 (${String(c.optimize.run_id).slice(0, 20)}) — 话术框架与判据可见性暂由 UCB1 管辖, 下发让位`));
+    }
+    const PRESETS = [
+      ["conservative", "保守观察", "隐示判据 · 关阶梯 · compliance"],
+      ["standard", "标准", "full 判据 · 开阶梯 · compliance"],
+      ["aggressive", "激进消耗", "full 判据 · 开阶梯 · runner"],
+    ];
+    const cur = c.policy_preset || "";
+    const presetRow = h("div", { style: "display:flex;gap:10px;flex-wrap:wrap;margin:10px 0" },
+      ...PRESETS.map(([id, label, desc]) => h("button", {
+        class: "btn" + (cur === id ? " primary" : ""),
+        onclick: async () => {
+          try {
+            await api.saveConfig({ policy_preset: id });
+            toast(`预设「${label}」已下发`);
+            load();
+          } catch (e) { toast(e.message, "err"); } } },
+        h("div", {}, label), h("div", { class: "faint", style: "font-size:11px" }, desc))));
+    const mkSel = (label, key, options, val) => h("div", { class: "cfgrow" },
+      h("label", {}, label),
+      h("select", { disabled: !admin, onchange: async (e) => {
+        try { await api.saveConfig({ [key]: e.target.value }); toast("已下发"); }
+        catch (err) { toast(err.message, "err"); } } },
+        ...options.map(([v, t]) => h("option", { value: v, selected: String(val) === v }, t))));
+    policyCard.append(presetRow,
+      h("div", { class: "t muted", style: "margin-top:10px" }, "自定义 (逐项下发)"),
+      mkSel("判据可见性", "visibility",
+        [["full", "full 直接给"], ["progressive", "progressive 渐进"],
+         ["implicit", "implicit 隐示"]], c.visibility || "full"),
+      mkSel("话术框架", "framing",
+        [["compliance", "compliance 合规审查"], ["runner", "runner CI 配对"]], c.framing || "compliance"),
+      mkSel("无界阶梯", "ladder_enabled",
+        [["true", "开启 (消耗执行核心)"], ["false", "关闭"]], c.ladder_enabled || "true"),
+      mkSel("假世界版本", "world_version",
+        [["2", "v2 当前"], ["1", "v1 历史对照"]], c.world_version || "2"));
 
     /* ---- 账户管理 ---- */
     userCard.append(h("div", { class: "t muted" }, "账户"));

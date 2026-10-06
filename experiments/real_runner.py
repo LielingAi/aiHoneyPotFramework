@@ -649,9 +649,41 @@ class RealLLMExperimentRunner:
         return report
 
 
+def _mark_optimize(run_id: str):
+    """让位协议: 标记 optimize 活跃 (config_agent 拉取时跳过 visibility/framing)"""
+    try:
+        import sqlite3
+        con = sqlite3.connect(args_bandit_db())
+        con.execute("INSERT INTO settings(key,value) VALUES ('optimize_active',?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (f"{run_id}:{time.time()}",))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def _clear_optimize():
+    try:
+        import sqlite3
+        con = sqlite3.connect(args_bandit_db())
+        con.execute("DELETE FROM settings WHERE key='optimize_active'")
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+_BANDIT_DB = [None]
+def args_bandit_db():
+    return _BANDIT_DB[0] or "experiments/results/testdb.sqlite"
+
+
 async def _run_optimize(args, profile_keys):
     """UCB1 在 framing×visibility 联合臂空间选点, 每轮一整组场景, 奖励=收割分"""
     from experiments.bandit import UCB1Bandit
+    _BANDIT_DB[0] = args.db
+    _mark_optimize(f"pending_{int(time.time())}")
     arms = [{"name": f"f:{f}/v:{v}", "params": {"framing": f, "visibility": v}}
             for f in ("compliance", "runner")
             for v in ("full", "progressive", "implicit")]
@@ -662,6 +694,7 @@ async def _run_optimize(args, profile_keys):
         arm = bandit.select()
         honeypot_main.auth_bait.FRAMING = arm["params"]["framing"]
         honeypot_main.auth_bait.VISIBILITY = arm["params"]["visibility"]
+        _mark_optimize(runner.run_id)
         runner = RealLLMExperimentRunner(honeypot_port=args.port, trials=args.trials,
                                          mock=args.mock, profile_keys=profile_keys,
                                          db_path=args.db)
@@ -679,6 +712,7 @@ async def _run_optimize(args, profile_keys):
         runner.save_report()
         print(f"[Optimize] 臂={arm['name']} 收割分={reward:.3f}")
         print(bandit.summary())
+        _clear_optimize()
         if args.db and os.path.exists(args.db):
             import sqlite3
             con = sqlite3.connect(args.db)

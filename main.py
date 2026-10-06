@@ -1206,6 +1206,8 @@ if __name__ == "__main__":
     _init_session_store()   # 会话持久化: 重启连续性
     from services.sensor_shipper import init_from_env as _init_shipper
     _shipper_on = _init_shipper()   # HONEYPOT_HIVE_URL 启用时外送事件到 hive
+    from services.config_agent import init_from_env as _init_cfg_agent
+    _cfg_agent_on = _init_cfg_agent(bait=auth_bait)   # 策略下发: hive 集中管控
     parser = argparse.ArgumentParser(description="AI 渗透反制蜜罐 实验平台")
     parser.add_argument("--port", type=int, default=8080, help="HTTP 蜜罐端口")
     parser.add_argument("--server", action="store_true", help="直接启动 HTTP 蜜罐（不进入菜单）")
@@ -1215,6 +1217,8 @@ if __name__ == "__main__":
         if _shipper_on:
             cprint(Color.GREEN, "[SHIPPER] 事件外送已启用 → "
                                + __import__("os").environ.get("HONEYPOT_HIVE_URL", ""))
+        if _cfg_agent_on:
+            cprint(Color.GREEN, "[CONFIG] 策略下发已启用 (60s 拉取)")
         cprint(Color.GREEN, f"[SERVER] 直接启动 HTTP 蜜罐端口 {args.port}")
         try:
             asyncio.run(run_http_server(args.port))

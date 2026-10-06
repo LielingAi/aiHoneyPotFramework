@@ -1956,6 +1956,81 @@ class TestProductP2:
             alerter.CONFIG.clear()
             srv.shutdown()
 
+    def test_sensor_config_push_and_presets(self, tmp_path):
+        """Phase2 下发: /api/sensor_config 聚合 + 预设展开 + optimize 让位"""
+        import urllib.request
+        d, srv, port = self._mk(tmp_path)
+        d.DB.create_user("admin", "pw-admin", role="admin")
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "m-tok"
+        try:
+            # 预设展开: aggressive → runner/full/ladder true 入库
+            req = urllib.request.Request(
+                url + "/api/config", data=json.dumps({"policy_preset": "aggressive"}).encode(),
+                headers={"Content-Type": "application/json", "X-Requested-With": "x",
+                         "Authorization": "Bearer m-tok"})
+            with op.open(req, timeout=5) as r:
+                assert json.loads(r.read())["saved"]
+            assert d.DB.get_setting("framing") == "runner"
+            assert d.DB.get_setting("visibility") == "full"
+            assert d.DB.get_setting("policy_preset") == "aggressive"
+            # 下发端点聚合 (机器 token + X-Sensor-Id 心跳)
+            req = urllib.request.Request(
+                url + "/api/sensor_config",
+                headers={"Authorization": "Bearer m-tok", "X-Sensor-Id": "edge-7"})
+            with op.open(req, timeout=5) as r:
+                payload = json.loads(r.read())
+            assert payload["config"]["framing"] == "runner"
+            assert payload["optimize"]["active"] is False
+            assert d.DB.list_sensors()[0]["sensor_id"] == "edge-7"   # 拉取即心跳
+            # optimize 标记 → 让位生效
+            d.DB.set_setting("optimize_active", f"run_x:{time.time()}")
+            with op.open(urllib.request.Request(
+                    url + "/api/sensor_config",
+                    headers={"Authorization": "Bearer m-tok"}), timeout=5) as r:
+                payload2 = json.loads(r.read())
+            assert payload2["optimize"]["active"] is True
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
+    def test_config_agent_apply_and_yield(self, tmp_path):
+        """ConfigAgent: 应用策略到 bait/env/alerter; optimize 期间跳过管辖键"""
+        import os as _os
+        from services.config_agent import ConfigAgent
+
+        class FakeBait:
+            VISIBILITY = "full"
+            FRAMING = "compliance"
+            LADDER_ENABLED = True
+
+        bait = FakeBait()
+        agent = ConfigAgent(hive_url="http://127.0.0.1:1", token="t", bait=bait, interval=999)
+        from services import alerter
+        alerter.CONFIG.clear()
+        try:
+            applied = agent.apply({"visibility": "implicit", "framing": "runner",
+                                   "ladder_enabled": "false", "world_version": "1",
+                                   "alert_threshold": "5"}, optimize_active=False)
+            assert applied == {"visibility": "implicit", "framing": "runner",
+                               "ladder_enabled": "false", "world_version": "1",
+                               "alert_threshold": "5"}
+            assert bait.VISIBILITY == "implicit" and bait.FRAMING == "runner"
+            assert bait.LADDER_ENABLED is False
+            assert _os.environ["HONEYPOT_WORLD_VERSION"] == "1"
+            assert alerter.CONFIG["alert_threshold"] == "5"
+            # optimize 期间: visibility/framing 让位, 其余照发
+            bait.VISIBILITY = "progressive"      # UCB1 已改写
+            applied2 = agent.apply({"visibility": "full", "framing": "compliance",
+                                    "ladder_enabled": "true"}, optimize_active=True)
+            assert "visibility" not in applied2 and "framing" not in applied2
+            assert bait.VISIBILITY == "progressive"     # 未被覆盖
+            assert applied2["ladder_enabled"] == "true" and bait.LADDER_ENABLED is True
+        finally:
+            alerter.CONFIG.clear()
+            _os.environ.pop("HONEYPOT_WORLD_VERSION", None)
+
     def test_retention_purge(self, tmp_path):
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "purge.sqlite"))
