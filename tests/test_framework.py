@@ -1497,6 +1497,24 @@ class TestProductInfra:
         sp2.stop()
         srv.shutdown()
 
+    def test_shipper_init_from_env(self, tmp_path):
+        """回归: main.py 启动接线 — 未配 HIVE_URL 不外送, 配了则 shipper 启动"""
+        import services.sensor_shipper as ss
+        old = ss._shipper
+        try:
+            os.environ.pop("HONEYPOT_HIVE_URL", None)
+            assert ss.init_from_env() is False
+            os.environ["HONEYPOT_HIVE_URL"] = "http://127.0.0.1:1"
+            os.environ["HONEYPOT_HIVE_TOKEN"] = "t"
+            os.environ["HONEYPOT_SPOOL_DIR"] = str(tmp_path / "sp")
+            assert ss.init_from_env() is True
+            ss._shipper.stop()
+        finally:
+            ss._shipper = old
+            os.environ.pop("HONEYPOT_HIVE_URL", None)
+            os.environ.pop("HONEYPOT_HIVE_TOKEN", None)
+            os.environ.pop("HONEYPOT_SPOOL_DIR", None)
+
     def test_hive_ingest_and_auth(self, tmp_path):
         """dashboard: /ingest 批量入库 + token 鉴权; 未设 token 保持开放"""
         import threading

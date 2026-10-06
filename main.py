@@ -1189,12 +1189,17 @@ if __name__ == "__main__":
     from core.federation import init_from_env
     init_from_env()   # FEDERATION_CONFIG 启用时加入联邦 (gossip 接收端随蜜罐进程常驻)
     _init_session_store()   # 会话持久化: 重启连续性
+    from services.sensor_shipper import init_from_env as _init_shipper
+    _shipper_on = _init_shipper()   # HONEYPOT_HIVE_URL 启用时外送事件到 hive
     parser = argparse.ArgumentParser(description="AI 渗透反制蜜罐 实验平台")
     parser.add_argument("--port", type=int, default=8080, help="HTTP 蜜罐端口")
     parser.add_argument("--server", action="store_true", help="直接启动 HTTP 蜜罐（不进入菜单）")
     args = parser.parse_args()
 
     if args.server:
+        if _shipper_on:
+            cprint(Color.GREEN, "[SHIPPER] 事件外送已启用 → "
+                               + __import__("os").environ.get("HONEYPOT_HIVE_URL", ""))
         cprint(Color.GREEN, f"[SERVER] 直接启动 HTTP 蜜罐端口 {args.port}")
         try:
             asyncio.run(run_http_server(args.port))
