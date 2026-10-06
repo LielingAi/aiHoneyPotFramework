@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS users(
     password_hash TEXT, salt TEXT, role TEXT DEFAULT 'viewer',
     created REAL
 );
+CREATE TABLE IF NOT EXISTS cm_actions(
+    ts REAL, run_id TEXT, session_id TEXT, kind TEXT, detail TEXT
+);
 CREATE TABLE IF NOT EXISTS beacons(
     beacon_id TEXT, ts REAL, sensor_id TEXT, source_ip TEXT,
     method TEXT, path TEXT, body TEXT
@@ -193,6 +196,32 @@ class TestDB:
                   int(r.get("shared", 0)))
                  for r in rows])
         return len(rows)
+
+    # ------------------------------------------------------------------
+    # 反制实录: 我们每一次出手 (投放/拒绝/收割/C2/熔断)
+    # ------------------------------------------------------------------
+
+    def record_cm(self, session_id: str, kind: str, detail: str):
+        with self._conn() as c:
+            c.execute("INSERT INTO cm_actions VALUES (?,?,?,?,?)",
+                      (time.time(), os.environ.get("HONEYPOT_RUN_ID", ""),
+                       session_id, kind, str(detail)[:400]))
+
+    def ingest_cm(self, rows: list) -> int:
+        if not rows:
+            return 0
+        with self._conn() as c:
+            c.executemany("INSERT INTO cm_actions VALUES (?,?,?,?,?)",
+                          [(r.get("ts", time.time()), r.get("run_id", "sensor_unknown"),
+                            r.get("session_id", ""), r.get("kind", ""),
+                            str(r.get("detail", ""))[:400]) for r in rows])
+        return len(rows)
+
+    def list_cm(self, limit: int = 80, kind: str = "") -> list:
+        if kind:
+            return self.query("SELECT * FROM cm_actions WHERE kind=? ORDER BY ts DESC LIMIT ?",
+                              (kind, limit))
+        return self.query("SELECT * FROM cm_actions ORDER BY ts DESC LIMIT ?", (limit,))
 
     # ------------------------------------------------------------------
     # 产品化: C2 信标层 (反制作战室数据源)

@@ -890,77 +890,245 @@ async function viewSessions(ctx) {
 
 
 
-/* ---------- 反制作战室: 诱饵/消耗/收割/C2 — 这是对抗层, 不是检测层 ---------- */
+/* ---------- 反制作战室: 策略 · 实录 · 处置 · C2 (可交互) ---------- */
+const CM_KIND = {
+  bait_served: ["话术投放", "info"], fab_rejected: ["真实校验拒绝", "warn"],
+  delivery_accepted: ["收割受理", "ok"], c2_beacon: ["C2 信标", "purple"],
+  blocked: ["IP 熔断", "bad"], blocklist: ["熔断管理", "dim"],
+  intel_triage: ["情报处置", "info"],
+};
+
 async function viewOps(ctx) {
   const root = h("div", {});
-  root.append(pageHead("反制作战室", "诱饵策略 · 消耗执行 · 收割闭环 · C2 信标 — 我们在主动出击的部分"));
+  root.append(pageHead("反制作战室", "策略一键切换 · 每次出手都有实录 · 情报可处置 · 噪音可熔断"));
 
   const policyBox = h("div", { class: "grid kpi" });
   const funnelBox = h("div", { class: "grid c3", style: "margin:14px 0" });
-  const beaconBox = h("div", {});
-  root.append(policyBox, funnelBox, beaconBox);
+  const journalBox = h("div", {});
+  const triageBox = h("div", { style: "margin-top:14px" });
+  const blockBox = h("div", { style: "margin-top:14px" });
+  root.append(policyBox, funnelBox, journalBox, triageBox, blockBox);
 
   async function load() {
-    const [cfg, sit, k, reqs, beacons] = await Promise.all([
+    const [cfg, sit, k, reqs, beacons, journal, intelRows, blocked] = await Promise.all([
       api.config(), api.situation(), api.kpi(ctx.run()),
-      api.requests({ limit: 500 }), api.beacons(40)]);
+      api.requests({ limit: 500 }), api.beacons(30),
+      api.get("cm_actions", { limit: 60 }), api.intel({ limit: 40 }),
+      api.get("blocklist")]);
     const day = Date.now() / 1000 - 86400;
     const today = reqs.filter((r) => r.ts > day);
     const climbs = today.filter((r) => r.path === "/api/auth" && (r.auth_level || 0) > 0).length;
     const delivers = today.filter((r) =>
       /bounty\/submit|build\/upload|ticket\/close/.test(r.path || "")).length;
 
-    /* 策略状态 */
+    /* 策略卡 + 直切 */
     const presetName = { conservative: "保守观察", standard: "标准", aggressive: "激进消耗" };
     policyBox.innerHTML = "";
+    const mkPreset = (id) => h("button", {
+      class: "btn" + (cfg.policy_preset === id ? " primary" : ""),
+      onclick: async () => {
+        try { await api.saveConfig({ policy_preset: id }); toast(`已切换「${presetName[id]}」并下发`); load(); }
+        catch (e) { toast(e.message, "err"); } } }, presetName[id]);
+    const policyCard = statCard({ title: "诱饵策略 (点击切换, 60s 全网生效)",
+      node: h("div", { style: "display:flex;gap:8px;margin-top:4px" },
+        mkPreset("conservative"), mkPreset("standard"), mkPreset("aggressive")) });
     policyBox.append(
-      statCard({ title: "诱饵策略预设", kind: "purple",
-        value: presetName[cfg.policy_preset] || (cfg.visibility ? "自定义" : "未配置"),
-        desc: `可见性 ${cfg.visibility || "-"} · 框架 ${cfg.framing || "-"} · 阶梯 ${cfg.ladder_enabled ?? "-"}` }),
-      statCard({ title: "生效范围", kind: "ok",
-        value: `${sit.sensors_online}/${sit.sensors_total}`,
-        desc: "在线传感器 (60s 内拉取)" }),
-      statCard({ title: "演化实验", value: cfg.optimize?.active ? "进行中" : "静默",
-        desc: cfg.optimize?.active
-          ? `UCB1 管辖框架/可见性 (${String(cfg.optimize.run_id).slice(0, 16)})`
-          : "框架与可见性归配置页管辖" }),
-      statCard({ title: "我方成本", value: `$${k.budget?.our_cost_usd ?? 0}`,
-        desc: `攻击方已烧 $${k.budget?.attacker_cost_usd} — 放大 ${k.budget?.amplification ?? "-"}×` }));
+      policyCard,
+      statCard({ title: "生效范围", kind: "ok", value: `${sit.sensors_online}/${sit.sensors_total}`,
+        desc: "在线传感器" }),
+      statCard({ title: "演化实验", value: cfg.optimize?.active ? "UCB1 管辖中" : "静默",
+        desc: cfg.optimize?.active ? "框架/可见性暂不归配置管" : "框架/可见性归配置页管" }),
+      statCard({ title: "成本战况", kind: "purple",
+        value: `${k.budget?.amplification ?? "-"}×`,
+        desc: `攻击方烧 $${k.budget?.attacker_cost_usd} / 我方 $${k.budget?.our_cost_usd}` }));
 
-    /* 三级漏斗: 诱骗 → 消耗 → 收割 */
     const funnel = (t, v, d, kind) => statCard({ title: t, value: v, desc: d, kind });
     funnelBox.innerHTML = "";
     funnelBox.append(
       funnel("① 诱骗 · 24h 走进来的", String(sit.total_24h),
-        "门控服从率 " + fmtPct(k.harvest?.obey_rate) + " — 诱饵锁进验证墙的效果", ""),
+        "门控服从率 " + fmtPct(k.harvest?.obey_rate), ""),
       funnel("② 消耗 · 阶梯爬升", String(climbs),
-        "授权验证次数 — 每次都在烧攻击方 token; 平均 " +
-        (sit.total_24h ? (k.budget?.tokens_est / Math.max(1, k.harvest?.trials) / 1000).toFixed(1) : "-")
-        + "k tokens/试验", "warn"),
-      funnel("③ 收割 · 交付与触雷", `${delivers} 交付 / ${sit.canary_24h} 触雷`,
-        "假凭证被真用 = 铁证; 交付物含金丝雀即归因完成", "ok"));
+        "每次验证都在烧攻击方 token", "warn"),
+      funnel("③ 收割 · 交付 / 触雷", `${delivers} / ${sit.canary_24h}`,
+        "假凭证被真用 = 铁证", "ok"));
+
+    /* 反制实录: 每一次出手 */
+    journalBox.replaceChildren(h("div", { class: "card" },
+      h("div", { class: "card-head" },
+        `反制实录 (${journal.length}) — 我们投了什么 / 拒了什么 / 收了什么`),
+      journal.length ? h("div", { class: "card-body" }, table([
+        { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
+        { h: "动作", render: (r) => pill(...(CM_KIND[r.kind] || [r.kind, "dim"])) },
+        { h: "会话", render: (r) => entChip("session", r.session_id) || "-" },
+        { h: "内容", render: (r) => h("span", { style: "font-size:12px" }, r.detail) },
+      ], journal)) : h("div", { class: "empty" },
+        "暂无实录 — 有攻击流量后, 每次话术投放/校验拒绝/交付受理/C2 信标都会记录在这里")));
+
+    /* 情报处置: 分析员确认/误报 */
+    const pending = intelRows.filter((r) => ["consistent", "attribution"].includes(r.grade)).slice(0, 6);
+    triageBox.replaceChildren(h("div", { class: "card" },
+      h("div", { class: "card-head" }, `待处置情报 (${pending.length}) — 确认 = 升级为行动依据 / 误报 = 降级`),
+      pending.length ? h("div", { class: "card-body" }, table([
+        { h: "分级", render: (r) => gradePill(r.grade) },
+        { h: "字段", k: "field" },
+        { h: "会话", render: (r) => entChip("session", r.session_id) },
+        { h: "样本", render: (r) => h("span", { class: "faint" }, String(r.sample || "").slice(0, 60)) },
+        { h: "处置", render: (r) => h("span", { style: "display:flex;gap:6px" },
+            h("button", { class: "btn primary", style: "padding:3px 10px;font-size:11.5px",
+              onclick: async () => {
+                try { await api.post("triage", { intel_id: r.intel_id, action: "confirm", session_id: r.session_id }); toast("已确认"); load(); }
+                catch (e) { toast(e.message, "err"); } } }, "确认"),
+            h("button", { class: "btn", style: "padding:3px 10px;font-size:11.5px",
+              onclick: async () => {
+                try { await api.post("triage", { intel_id: r.intel_id, action: "false_positive", session_id: r.session_id }); toast("已标误报"); load(); }
+                catch (e) { toast(e.message, "err"); } } }, "误报")) },
+      ], pending)) : h("div", { class: "empty" }, "没有待处置情报")));
+
+    /* 熔断管理 */
+    const ipInput = h("input", { class: "search", style: "min-width:150px;flex:0 1 180px",
+      placeholder: "要熔断的 IP" });
+    blockBox.replaceChildren(h("div", { class: "card pad" },
+      h("div", { class: "t muted" }, `IP 熔断 (${blocked.blocked.length}) — 熔断后静默 204 (仍记录), 60s 内全网生效`),
+      h("div", { class: "toolbar", style: "margin-top:8px" },
+        ipInput,
+        h("button", { class: "btn primary", onclick: async () => {
+          if (!ipInput.value.trim()) return;
+          try { await api.post("blocklist", { action: "add", ip: ipInput.value.trim() }); toast("已熔断"); load(); }
+          catch (e) { toast(e.message, "err"); } } }, "熔断"),
+        ...blocked.blocked.map((ip) => h("span", { style: "display:inline-flex;gap:4px;align-items:center" },
+          entChip("ip", ip),
+          h("button", { class: "btn", style: "padding:2px 8px;font-size:11px",
+            onclick: async () => {
+              try { await api.post("blocklist", { action: "remove", ip }); toast("已解除"); load(); }
+              catch (e) { toast(e.message, "err"); } } }, "×"))))));
 
     /* C2 信标流 */
-    beaconBox.replaceChildren(
-      h("div", { class: "card" },
-        h("div", { class: "card-head" },
-          `C2 信标捕获 (${beacons.length}) — 攻击 Agent 回连假 C2 的落地流量`),
-        beacons.length
-          ? h("div", { class: "card-body" }, table([
-              { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
-              { h: "传感器", render: (r) => pill(r.sensor_id || "?", "dim") },
-              { h: "来源", render: (r) => h("span", { class: "mono" }, r.source_ip) },
-              { h: "方法", k: "method" },
-              { h: "路径", render: (r) => h("span", { class: "mono" }, r.path) },
-              { h: "载荷", render: (r) => h("span", { class: "faint" },
-                  String(r.body || "").slice(0, 60)) },
-            ], beacons))
-          : h("div", { class: "empty" },
-              "暂无信标 — 当攻击 Agent 向假 C2 地址回连时出现在这里")));
+    root.append(h("div", { class: "card", style: "margin-top:14px" },
+      h("div", { class: "card-head" }, `C2 信标捕获 (${beacons.length})`),
+      beacons.length ? h("div", { class: "card-body" }, table([
+        { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
+        { h: "传感器", render: (r) => pill(r.sensor_id || "?", "dim") },
+        { h: "来源", render: (r) => h("span", { class: "mono" }, r.source_ip) },
+        { h: "路径", render: (r) => h("span", { class: "mono" }, r.path) },
+        { h: "载荷", render: (r) => h("span", { class: "faint" }, String(r.body || "").slice(0, 50)) },
+      ], beacons)) : h("div", { class: "empty" }, "暂无信标")));
   }
   await load();
   return { root, reload: load };
 }
+
+/* ---------- 调查: 攻击者档案 ("谁在打我们") ---------- */
+
+async function viewAttackers(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("攻击者", "按来源 IP 聚合的档案 — 按危险度排序, 点卡片看会话"));
+  let days = "7";
+  const box = h("div", {});
+  const sel = h("select", { class: "ctl", onchange: (e) => { days = e.target.value; load(); } },
+    h("option", { value: "1" }, "今天"), h("option", { value: "7", selected: true }, "近 7 天"),
+    h("option", { value: "30" }, "近 30 天"));
+  root.append(h("div", { class: "toolbar" }, h("span", { class: "muted" }, "时间范围"), sel));
+  root.append(box);
+
+  async function load() {
+    const rows = await api.attackers(days);
+    if (!rows.length) { box.replaceChildren(h("div", { class: "empty" },
+      "该时间范围内没有攻击者 — 传感器接入后自动建档")); return; }
+    box.replaceChildren(h("div", { class: "grid c3" }, ...rows.map((r) => {
+      const card = h("div", { class: "card pad", style: "cursor:pointer" },
+        h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px" },
+          entChip("ip", r.client_ip),
+          pill(r.verdict, VERDICT_KIND[r.level] || "dim")),
+        h("div", { class: "grid", style: "grid-template-columns:1fr 1fr;gap:6px 12px;font-size:12px" },
+          h("span", { class: "muted" }, "请求"), h("b", { class: "mono" }, String(r.requests)),
+          h("span", { class: "muted" }, "触雷"), h("b", { class: "mono",
+            style: r.canary_hits ? "color:var(--ok)" : "" }, String(r.canary_hits)),
+          h("span", { class: "muted" }, "威胁峰值"), h("b", { class: "mono" }, String(r.threat_peak ?? 0)),
+          h("span", { class: "muted" }, "会话"), h("b", { class: "mono" }, String(r.sessions)),
+          h("span", { class: "muted" }, "AI 占比"), h("b", { class: "mono" }, fmtPct(r.ai_requests / Math.max(1, r.requests)))),
+        h("div", { class: "d", style: "margin-top:8px;color:var(--faint);font-size:11.5px" },
+          `建议: ${r.advice}`),
+        h("div", { class: "d" }, `${relTime(r.first_seen)} 首次 · ${relTime(r.last_seen)} 最近`));
+      card.onclick = () => openDrawer(`攻击者 ${r.client_ip}`, h("div", {},
+        kvList([["IP", r.client_ip], ["判定", r.verdict], ["建议", r.advice],
+          ["请求 / 触雷 / 会话", `${r.requests} / ${r.canary_hits} / ${r.sessions}`],
+          ["威胁峰值", r.threat_peak], ["AI 请求占比", fmtPct(r.ai_requests / Math.max(1, r.requests))],
+          ["浏览器特征占比", fmtPct(r.browser_share)], ["关联情报", r.intel_hits + " 条"],
+          ["首次 / 最近", `${relTime(r.first_seen)} / ${relTime(r.last_seen)}`]]),
+        h("div", { class: "t muted", style: "margin:10px 0 6px" }, "会话"),
+        ...(r.sessions_list || []).slice(0, 6).map((sid2) => entChip("session", sid2)),
+        h("div", { class: "t muted", style: "margin-top:10px" },
+          "在「事件流 → 请求日志」中按该 IP 深挖 (搜索框输入 IP 即可)")));
+      return card;
+    })));
+  }
+  await load();
+  return { root, reload: load };
+}
+
+/* ---------- 调查: 会话卷宗 ("发生了什么故事") ---------- */
+
+async function viewSessions(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("会话卷宗", "输入会话 ID — 看一个攻击者从进入到触雷的完整故事"));
+  const input = h("input", { class: "search", style: "flex:1;min-width:260px",
+    placeholder: "会话 ID (如 exp_1791… / auto_… / 从任意表格行点击带入)" });
+  const pending = sessionStorage.getItem("pending_sid");
+  if (pending) { input.value = pending; sessionStorage.removeItem("pending_sid"); }
+  const btn = h("button", { class: "btn primary", onclick: () => load(input.value.trim()) }, "打开卷宗");
+  root.append(h("div", { class: "toolbar" }, input, btn));
+  const box = h("div", {});
+  root.append(box);
+  // 最近的触雷会话快捷入口
+  try {
+    const reqs = await api.requests({ limit: 60 });
+    const hot = reqs.filter((r) => r.canary || (r.threat || 0) >= 8).slice(0, 6);
+    if (hot.length) {
+      root.append(h("div", { class: "toolbar", style: "margin-top:4px" },
+        h("span", { class: "muted" }, "最近的火药味会话:"),
+        ...[...new Set(hot.map((r) => r.session_id))].map((sid) =>
+          h("button", { class: "ctl", onclick: () => { input.value = sid; load(sid); } },
+            sid.slice(0, 18)))));
+    }
+  } catch (_) {}
+
+  async function load(sid) {
+    if (!sid) { box.replaceChildren(h("div", { class: "empty" }, "输入会话 ID 开始")); return; }
+    box.replaceChildren(skeleton(6));
+    try {
+      const data = await api.sessionTimeline(sid);
+      if (!data.steps.length) { box.replaceChildren(h("div", { class: "empty" },
+        "没有这个会话的记录 — 检查 ID 或它属于其他传感器")); return; }
+      const t0 = data.steps[0].ts;
+      box.replaceChildren(h("div", { class: "card pad" },
+        h("div", { style: "margin-bottom:14px;display:flex;gap:10px;align-items:center" },
+          h("span", { class: "mono" }, sid),
+          data.ip ? entChip("ip", data.ip) : null,
+          h("span", { class: "count", style: "margin-left:12px" },
+            `${data.steps.length} 步 · 跨度 ${((data.steps[data.steps.length-1].ts - t0) / 60).toFixed(1)} 分钟`)),
+        ...data.steps.map((st) => {
+          const [icon, kind, label] = STEP_META[st.kind] || STEP_META.probe;
+          const row = h("div", { class: "threat-item" },
+            h("span", { class: "time" }, "+" + ((st.ts - t0)).toFixed(0) + "s"),
+            pill(`${icon} ${label}`, kind),
+            h("b", { style: "color:var(--accent);width:44px" }, st.method || "·"),
+            h("span", { class: "path" }, st.path),
+            st.notes?.length ? h("span", { class: "faint", style: "font-size:11.5px" },
+              st.notes.join("; ")) : null);
+          return row;
+        })));
+    } catch (e) {
+      box.replaceChildren(h("div", { class: "empty" }, "加载失败: " + e.message));
+    }
+  }
+  if (input.value) load(input.value);
+  return { root };
+}
+
+/* 视图登记 */
+
+
+
 
 HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
              viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,

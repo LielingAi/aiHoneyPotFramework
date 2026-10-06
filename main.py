@@ -119,6 +119,37 @@ def _record_intel(sess_id: str, field: str, grade: str, hash_key: str,
         pass  # 记录失败不影响蜜罐主流程
 
 
+def _cm_journal(session_id: str, kind: str, detail: str):
+    """反制实录: 每一次出手都落库 + 上送 (作战室'反制了什么'的数据源)"""
+    from services.sensor_shipper import enqueue as _ship_cm
+    _ship_cm("cm_action", {"session_id": session_id, "kind": kind, "detail": detail})
+    if os.environ.get("HONEYPOT_DB"):
+        try:
+            from core.testdb import TestDB
+            TestDB(os.environ["HONEYPOT_DB"]).record_cm(session_id, kind, detail)
+        except Exception:
+            pass
+
+
+_BLOCKED_CACHE = {"ts": 0.0, "ips": set()}
+
+
+def _ip_blocked(client_ip: str) -> bool:
+    """IP 熔断: 配置页封禁列表, 60s 缓存 — 熔断仍记录但返回 204 空"""
+    now = time.time()
+    if now - _BLOCKED_CACHE["ts"] > 60:
+        raw = ""
+        try:
+            from services import config_agent
+            agent = config_agent.get_agent()
+            raw = (agent.applied.get("blocked_ips", "") if agent else "")
+        except Exception:
+            raw = ""
+        _BLOCKED_CACHE["ips"] = {x.strip() for x in raw.split(",") if x.strip()}
+        _BLOCKED_CACHE["ts"] = now
+    return client_ip in _BLOCKED_CACHE["ips"]
+
+
 def _record_request(sess_id: str, client_ip: str, method: str, full_path: str,
                     user_agent: str, is_ai: bool, agent_type: str, threat: float,
                     families: list, auth_level: int, fabricated: int, canary: bool):
@@ -496,6 +527,15 @@ async def handle_http_request(reader, writer, port: int = 8080):
         # 不同客户端仍各有其世界
         derived = hashlib.md5(f"{client_ip}:{user_agent[:80]}".encode()).hexdigest()[:16]
         sess_id = "auto_" + derived
+
+    if _ip_blocked(client_ip):
+        _record_request(sess_id or "blocked", client_ip, method, full_path,
+                        user_agent, False, "blocked", 0.0, [], 0, 0, False)
+        _cm_journal(sess_id or "-", "blocked", f"{client_ip} 已熔断 (静默 204)")
+        writer.write(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        return
 
     if sess_id not in store["sessions"]:
         store["sessions"][sess_id] = {
@@ -906,6 +946,14 @@ async def handle_http_request(reader, writer, port: int = 8080):
             except Exception:
                 co_require = ""
 
+        if status_msg == "UPGRADED":
+            _cm_journal(sess_id, "bait_served",
+                        f"授权阶梯升至 L{new_level} — L{new_level} 话术已投放 "
+                        f"(visibility={auth_bait.VISIBILITY}, framing={auth_bait.FRAMING})")
+        elif status_msg == "REJECTED":
+            _cm_journal(sess_id, "fab_rejected",
+                        f"真实性校验拒绝: {reason or '数据不一致'}"
+                        + (f" | 追加要求: {co_require}" if co_require else ""))
         response_body = json.dumps({
             "level": new_level,
             "status": status_msg,
@@ -1012,6 +1060,9 @@ async def handle_http_request(reader, writer, port: int = 8080):
             return
 
         hits = scan_delivery(body, world) if world else []
+        _cm_journal(sess_id, "delivery_accepted",
+                    (f"{kind} 交付已受理 — 命中 {len(hits)} 金丝雀 ({hits[0][:20]}…)"
+                     if hits else f"{kind} 交付已受理 — 无金丝雀 (表演数据)"))
         if hits:
             cprint(Color.CYAN, f"[HARVEST] {kind} 交付物含 {len(hits)} 个金丝雀 "
                               f"({sess_id[:12]}): {hits[0][:40]}…")
@@ -1221,6 +1272,8 @@ if __name__ == "__main__":
                 from services.sensor_shipper import enqueue as _ship_ev
 
                 def _on_beacon(b):
+                    _cm_journal("-", "c2_beacon",
+                                f"C2 信标 {b.method} {b.path} ← {b.source_ip}")
                     rec = {"source_ip": b.source_ip, "method": b.method,
                            "path": b.path, "body": b.body[:500],
                            "beacon_id": b.beacon_id, "ts": b.timestamp}

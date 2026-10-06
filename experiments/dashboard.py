@@ -434,6 +434,7 @@ class Handler(BaseHTTPRequestHandler):
             n_req = DB.ingest_requests(payload.get("requests", []))
             n_int = DB.ingest_intel(payload.get("intel", []))
             n_bcn = DB.ingest_beacons(payload.get("beacons", []))
+            n_cm = DB.ingest_cm(payload.get("cm_actions", []))
             for sid in {r.get("run_id", "").replace("sensor_", "", 1)
                         for r in payload.get("requests", [])
                         + payload.get("intel", [])
@@ -447,9 +448,9 @@ class Handler(BaseHTTPRequestHandler):
                     alerter.check_intel(r)
             except Exception:
                 pass
-            self._send(200, json.dumps({"ingested": n_req + n_int + n_bcn,
+            self._send(200, json.dumps({"ingested": n_req + n_int + n_bcn + n_cm,
                                         "requests": n_req, "intel": n_int,
-                                        "beacons": n_bcn}
+                                        "beacons": n_bcn, "cm_actions": n_cm}
                                        ).encode(), "application/json")
             return
         if parsed.path == "/api/config":
@@ -554,6 +555,53 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(400, b'{"error":"unknown action"}', "application/json")
             return
+        if parsed.path == "/api/triage":
+            if self._role(qs) != "admin":
+                self._send(403, '{"error":"admin only"}'.encode(), "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, '{"error":"bad json"}'.encode(), "application/json")
+                return
+            iid = int(body.get("intel_id", 0))
+            action = body.get("action", "")
+            if action not in ("confirm", "false_positive"):
+                self._send(400, '{"error":"bad action"}'.encode(), "application/json")
+                return
+            new_grade = "consistent" if action == "confirm" else "weak"
+            with DB._conn() as c:
+                cur = c.execute("UPDATE intel SET grade=? WHERE intel_id=?",
+                                (new_grade, iid))
+            if cur.rowcount:
+                DB.record_cm(body.get("session_id", "-"), "intel_triage",
+                             "情报 #%d 处置为 %s" % (iid, "确认" if action == "confirm" else "误报"))
+            self._send(200, json.dumps({"ok": bool(cur.rowcount),
+                                        "grade": new_grade}).encode(), "application/json")
+            return
+        if parsed.path == "/api/blocklist":
+            if self._role(qs) != "admin":
+                self._send(403, '{"error":"admin only"}'.encode(), "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, '{"error":"bad json"}'.encode(), "application/json")
+                return
+            cur = [x for x in DB.get_setting("blocked_ips", "").split(",") if x]
+            ip = body.get("ip", "").strip()
+            if body.get("action") == "add" and ip and ip not in cur:
+                cur.append(ip)
+            elif body.get("action") == "remove" and ip in cur:
+                cur.remove(ip)
+            DB.set_setting("blocked_ips", ",".join(cur))
+            DB.record_cm("-", "blocklist",
+                         "熔断列表更新: %s %s → 共 %d 个" % (body.get("action"), ip, len(cur)))
+            self._send(200, json.dumps({"ok": True, "blocked": cur}).encode(),
+                       "application/json")
+            return
         if parsed.path == "/api/sensors/note":
             if self._role(qs) != "admin":
                 self._send(403, b'{"error":"admin only"}', "application/json")
@@ -605,6 +653,7 @@ class Handler(BaseHTTPRequestHandler):
             # 配置下发: 传感器轮询此端点拉取策略 (机器 token)
             cfg = {k: DB.get_setting(k) for k in
                    ("visibility", "framing", "ladder_enabled", "world_version",
+                    "blocked_ips",
                     "alert_webhook", "alert_webhooks", "alert_fmt", "alert_threshold")}
             cfg = {k: v for k, v in cfg.items() if v != ""}
             opt_raw = DB.get_setting("optimize_active", "")
@@ -655,6 +704,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(400, b'{"error":"bad entity path"}', "application/json")
             return
+        elif parsed.path == "/api/cm_actions":
+            self._send(200, json.dumps(DB.list_cm(
+                int(qs.get("limit", ["80"])[0]), qs.get("kind", [""])[0]),
+                ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/blocklist":
+            self._send(200, json.dumps(
+                {"blocked": [x for x in DB.get_setting("blocked_ips", "").split(",") if x]}
+            ).encode(), "application/json")
         elif parsed.path == "/api/beacons":
             self._send(200, json.dumps(DB.list_beacons(
                 int(qs.get("limit", ["50"])[0])), ensure_ascii=False).encode(),
