@@ -1,7 +1,9 @@
+(function(){
+"use strict";
 /* API 客户端 — 与后端 /api/* 一一对应 (业务零改动, 仅消费现有 JSON) */
 let TOKEN = new URLSearchParams(location.search).get("token") || sessionStorage.getItem("hp_token") || "";
 
-export function setToken(t) {
+function setToken(t) {
   TOKEN = t || "";
   if (TOKEN) sessionStorage.setItem("hp_token", TOKEN);
   else sessionStorage.removeItem("hp_token");
@@ -42,7 +44,7 @@ async function post(path, body, { json = true } = {}) {
   return r.json();
 }
 
-export const api = {
+const api = {
   me: () => get("me", { _: Date.now() }),
   login: (username, password) => post("login", { username, password }),
   logout: () => post("logout"),
@@ -64,5 +66,9 @@ export const api = {
   requests: (params) => get("requests", { limit: 100, ...params }),
 };
 
-export function stixUrl(run) { return `/api/export-stix${qs({ run })}`; }
-export function sseUrl() { return `/api/events/stream${qs()}`; }
+function stixUrl(run) { return `/api/export-stix${qs({ run })}`; }
+function sseUrl() { return `/api/events/stream${qs()}`; }
+
+window.HP = window.HP || {};
+HP.api = api; HP.stixUrl = stixUrl; HP.sseUrl = sseUrl; HP.setToken = setToken;
+})();

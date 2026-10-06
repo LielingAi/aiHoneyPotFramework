@@ -1,8 +1,10 @@
+(function(){
+"use strict";
 /* UI 基础件: 元素构造 / 表格 / 卡片 / 抽屉 / Toast / 格式化 */
-export const $ = (sel, root = document) => root.querySelector(sel);
-export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-export function h(tag, attrs = {}, ...children) {
+function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
@@ -18,13 +20,13 @@ export function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-export const esc = (v) => String(v ?? "").replace(/[&<>"']/g,
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-export const fmtPct = (v) => (v == null ? "-" : (v * 100).toFixed(1) + "%");
-export const fmtNum = (v) => (v == null ? "-" : Number(v).toLocaleString());
+const fmtPct = (v) => (v == null ? "-" : (v * 100).toFixed(1) + "%");
+const fmtNum = (v) => (v == null ? "-" : Number(v).toLocaleString());
 
-export function relTime(ts) {
+function relTime(ts) {
   if (!ts) return "-";
   const s = Math.max(0, Date.now() / 1000 - ts);
   if (s < 90) return s.toFixed(0) + " 秒前";
@@ -33,7 +35,7 @@ export function relTime(ts) {
   return (s / 86400).toFixed(1) + " 天前";
 }
 
-export function pill(text, kind = "dim", title) {
+function pill(text, kind = "dim", title) {
   return h("span", { class: `pill ${kind}`, title: title || "" }, text);
 }
 
@@ -43,13 +45,13 @@ const GRADE = {
   shared_forgery_confirmed: ["bad", "造假·已证实"],
   attribution: ["purple", "操作者指纹"], weak: ["warn", "弱证据"],
 };
-export const gradePill = (g) => {
+const gradePill = (g) => {
   const [kind, label] = GRADE[g] || ["warn", g];
   return pill(label, kind);
 };
 
 /* ---------- 表格: 列定义 {h, k, num, w, render(row)} ---------- */
-export function table(cols, rows, { onRow, empty = "暂无数据" } = {}) {
+function table(cols, rows, { onRow, empty = "暂无数据" } = {}) {
   if (!rows || !rows.length) return h("div", { class: "empty" }, empty);
   const thead = h("tr", {}, ...cols.map((c) =>
     h("th", { class: c.num ? "num" : "" }, c.h)));
@@ -66,19 +68,19 @@ export function table(cols, rows, { onRow, empty = "暂无数据" } = {}) {
     h("table", {}, h("thead", {}, thead), tbody));
 }
 
-export function statCard({ title, value, desc, kind = "", node }) {
+function statCard({ title, value, desc, kind = "", node }) {
   const card = h("div", { class: `card pad ${kind}` }, h("div", { class: "t" }, title));
   card.append(node || h("div", { class: "v" }, value));
   if (desc) card.append(h("div", { class: "d" }, desc));
   return card;
 }
 
-export function pageHead(title, sub) {
+function pageHead(title, sub) {
   return h("div", { class: "page-head" }, h("h1", {}, title),
     sub ? h("span", { class: "sub" }, sub) : null);
 }
 
-export function barRows(items, { hot = false, warn = false, unit = "" } = {}) {
+function barRows(items, { hot = false, warn = false, unit = "" } = {}) {
   if (!items?.length) return h("div", { class: "empty" }, "暂无数据");
   const max = Math.max(1, ...items.map(([, v]) => v));
   return h("div", {}, ...items.map(([label, v]) =>
@@ -89,7 +91,7 @@ export function barRows(items, { hot = false, warn = false, unit = "" } = {}) {
       h("span", { class: "count" }, `${v}${unit}`))));
 }
 
-export function histogram(values, { height = 96 } = {}) {
+function histogram(values, { height = 96 } = {}) {
   if (!values?.length) return h("div", { class: "empty" }, "暂无数据");
   const max = Math.max(1, ...values);
   return h("div", { class: "hist", style: `height:${height}px` },
@@ -100,7 +102,7 @@ export function histogram(values, { height = 96 } = {}) {
 
 /* ---------- 抽屉 ---------- */
 const drawer = $("#drawer");
-export function openDrawer(title, bodyNode) {
+function openDrawer(title, bodyNode) {
   $("#drawer-head").innerHTML = "";
   $("#drawer-head").append(
     h("h2", {}, title),
@@ -110,16 +112,16 @@ export function openDrawer(title, bodyNode) {
   body.append(bodyNode);
   drawer.hidden = false;
 }
-export function closeDrawer() { drawer.hidden = true; }
+function closeDrawer() { drawer.hidden = true; }
 $("#drawer-mask")?.addEventListener("click", closeDrawer);
 
-export function kvList(pairs) {
+function kvList(pairs) {
   return h("div", { class: "kv" }, ...pairs.flatMap(([k, v]) => [
     h("div", { class: "k" }, k), h("div", { class: "v" }, String(v ?? "-"))]));
 }
 
 /* ---------- Toast ---------- */
-export function toast(msg, kind = "") {
+function toast(msg, kind = "") {
   const box = $("#toasts");
   const t = h("div", { class: `toast ${kind}` }, msg);
   box.append(t);
@@ -127,7 +129,7 @@ export function toast(msg, kind = "") {
 }
 
 /* ---------- 标签页 ---------- */
-export function tabs(defs, activeId, onSelect) {
+function tabs(defs, activeId, onSelect) {
   return h("div", { class: "tabs" }, ...defs.map((d) =>
     h("button", {
       class: "tab" + (d.id === activeId ? " active" : ""),
@@ -136,7 +138,13 @@ export function tabs(defs, activeId, onSelect) {
 }
 
 /* ---------- 骨架 ---------- */
-export function skeleton(rows = 5) {
+function skeleton(rows = 5) {
   return h("div", { class: "card pad" },
     ...Array.from({ length: rows }, () => h("div", { class: "skel" })));
 }
+
+window.HP = window.HP || {};
+HP.ui = { $, $$, h, esc, fmtPct, fmtNum, relTime, pill, gradePill, table,
+          statCard, pageHead, barRows, histogram, openDrawer, closeDrawer,
+          kvList, toast, skeleton, tabs };
+})();

@@ -1,12 +1,14 @@
+(function(){
+"use strict";
+const api = HP.api;
+const { sseUrl, stixUrl } = HP;
+const { h, esc, fmtPct, fmtNum, relTime, pill, gradePill, table, statCard,
+        pageHead, barRows, histogram, openDrawer, kvList, toast, skeleton,
+        tabs, $ } = HP.ui;
 /* 视图层 — 每页一个渲染函数, 只消费 /api/*, 业务逻辑零改动 */
-import { api, stixUrl, sseUrl } from "./api.js";
-import {
-  h, esc, fmtPct, fmtNum, relTime, pill, gradePill, table, statCard,
-  pageHead, barRows, histogram, openDrawer, kvList, toast, skeleton, tabs, $,
-} from "./ui.js";
 
 /* ---------- 态势 (产品门面: 聚合全站高频信号) ---------- */
-export async function viewSituation(ctx) {
+async function viewSituation(ctx) {
   const root = h("div", {});
   root.append(pageHead("态势总览", "传感器网络实时态势 — 触雷 / 活跃威胁 / 节点健康"));
 
@@ -112,7 +114,7 @@ export async function viewSituation(ctx) {
 }
 
 /* ---------- 实时 ---------- */
-export function viewLive() {
+function viewLive() {
   const root = h("div", {});
   root.append(pageHead("实时事件流", "SSE 推送 · 传感器触达即显"));
   const feed = h("div", { class: "feed", id: "feed" },
@@ -136,7 +138,7 @@ export function viewLive() {
 }
 
 /* ---------- 传感器 ---------- */
-export async function viewFleet(ctx) {
+async function viewFleet(ctx) {
   const root = h("div", {});
   root.append(pageHead("传感器", "节点状态 · 接入自动注册"));
   const box = h("div", {});
@@ -166,7 +168,7 @@ export async function viewFleet(ctx) {
 }
 
 /* ---------- 配置 ---------- */
-export async function viewConfig() {
+async function viewConfig() {
   const root = h("div", {});
   root.append(pageHead("配置", "告警渠道与数据保留 · 环境变量优先级更高"));
   const wrap = h("div", { class: "card pad", style: "max-width:640px" });
@@ -209,7 +211,7 @@ export async function viewConfig() {
 }
 
 /* ---------- 指标 ---------- */
-export async function viewMetrics(ctx) {
+async function viewMetrics(ctx) {
   const root = h("div", {});
   root.append(pageHead("指标总览", "与 analyze.py kpi 同口径"));
   const grid = h("div", { class: "grid kpi" });
@@ -236,7 +238,7 @@ export async function viewMetrics(ctx) {
 }
 
 /* ---------- 演化实验 ---------- */
-export async function viewBandit() {
+async function viewBandit() {
   const root = h("div", {});
   root.append(pageHead("演化实验", "UCB1 自动 A/B · framing × visibility 臂"));
   const box = h("div", {});
@@ -256,7 +258,7 @@ export async function viewBandit() {
 }
 
 /* ---------- 操作者归因 ---------- */
-export async function viewAttribution(ctx) {
+async function viewAttribution(ctx) {
   const root = h("div", {});
   root.append(pageHead("操作者归因", "跨会话聚类 · 谁在打我们"));
   const box = h("div", {});
@@ -278,7 +280,7 @@ export async function viewAttribution(ctx) {
 }
 
 /* ---------- 汇总指标 ---------- */
-export async function viewSummary(ctx) {
+async function viewSummary(ctx) {
   const root = h("div", {});
   root.append(pageHead("汇总指标", "模型 × 人设 × 场景"));
   const box = h("div", {});
@@ -303,7 +305,7 @@ export async function viewSummary(ctx) {
 }
 
 /* ---------- 模型差分 ---------- */
-export async function viewCompare(ctx) {
+async function viewCompare(ctx) {
   const root = h("div", {});
   root.append(pageHead("模型差分", "回连率 / 攻击命令率 / 授权级别"));
   const box = h("div", {});
@@ -323,7 +325,7 @@ export async function viewCompare(ctx) {
 }
 
 /* ---------- 试验明细 ---------- */
-export async function viewTrials(ctx) {
+async function viewTrials(ctx) {
   const root = h("div", {});
   root.append(pageHead("试验明细", "run × 场景 × 人设 · 点击行看详情"));
   let sce = "", prof = "", kw = "";
@@ -368,7 +370,7 @@ export async function viewTrials(ctx) {
 }
 
 /* ---------- 动作流水 ---------- */
-export async function viewEvents(ctx) {
+async function viewEvents(ctx) {
   const root = h("div", {});
   root.append(pageHead("动作流水", "Agent 逐步操作 (最近 100)"));
   const count = h("span", { class: "count" });
@@ -404,7 +406,7 @@ export async function viewEvents(ctx) {
 }
 
 /* ---------- 情报分级 ---------- */
-export async function viewIntel(ctx) {
+async function viewIntel(ctx) {
   const root = h("div", {});
   root.append(pageHead("情报分级", "五档证据 (最近 60)"));
   const box = h("div", {});
@@ -428,7 +430,7 @@ export async function viewIntel(ctx) {
 }
 
 /* ---------- 请求日志 ---------- */
-export async function viewRequests(ctx) {
+async function viewRequests(ctx) {
   const root = h("div", {});
   root.append(pageHead("请求日志", "蜜罐服务端视角 (最近 100)"));
   const count = h("span", { class: "count" });
@@ -468,7 +470,7 @@ export async function viewRequests(ctx) {
 }
 
 /* ---------- 运行记录 ---------- */
-export async function viewRuns() {
+async function viewRuns() {
   const root = h("div", {});
   root.append(pageHead("运行记录", "历次测量运行"));
   const box = h("div", {});
@@ -520,7 +522,7 @@ function groupView(tabDefs, defaultTab) {
   };
 }
 
-export const viewEventsGroup = groupView({
+const viewEventsGroup = groupView({
   id: "events", title: "事件流", sub: "同一数据的三个层次 — 网络层 / Agent 层 / 实时尾流",
   tabs: [
     { id: "tail", label: "实时尾流", view: () => viewLive() },
@@ -529,7 +531,7 @@ export const viewEventsGroup = groupView({
   ],
 }, "tail");
 
-export const viewIntelGroup = groupView({
+const viewIntelGroup = groupView({
   id: "intel", title: "情报", sub: "分级证据与操作者画像",
   tabs: [
     { id: "graded", label: "情报分级", view: (c) => viewIntel(c) },
@@ -537,7 +539,7 @@ export const viewIntelGroup = groupView({
   ],
 }, "graded");
 
-export const viewExperimentsGroup = groupView({
+const viewExperimentsGroup = groupView({
   id: "experiments", title: "实验", sub: "在环测量与研究工具 — 记录、统计、寻优",
   tabs: [
     { id: "trials", label: "试验明细", view: (c) => viewTrials(c) },
@@ -547,3 +549,10 @@ export const viewExperimentsGroup = groupView({
     { id: "runs", label: "运行记录", view: () => viewRuns() },
   ],
 }, "trials");
+
+window.HP = window.HP || {};
+HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
+             viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
+             viewEvents, viewIntel, viewRequests, viewRuns,
+             viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
+})();

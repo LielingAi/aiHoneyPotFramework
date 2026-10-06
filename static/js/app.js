@@ -1,9 +1,10 @@
+(function(){
+"use strict";
+const api = HP.api;
+const { stixUrl, setToken } = HP;
+const views = HP.views;
+const { $, h, toast, esc, openDrawer, closeDrawer } = HP.ui;
 /* 应用外壳 — 路由 / 导航 / 全局筛选 / 命令面板 / 生命周期 */
-import { api, stixUrl, setToken } from "./api.js";
-import {
-  $, h, toast, esc, openDrawer, closeDrawer,
-} from "./ui.js";
-import * as views from "./views.js";
 
 /* ---------- 信息架构: 分组导航 ---------- */
 const NAV = [
@@ -255,3 +256,4 @@ $("#login-form").addEventListener("submit", (e) => {
 
 armAuto();
 boot();
+})();
