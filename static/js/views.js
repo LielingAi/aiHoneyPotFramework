@@ -30,9 +30,13 @@ async function viewSituation(ctx) {
   root.append(h("div", { class: "grid c2", style: "margin-top:12px" },
     h("div", { class: "card" },
       h("div", { class: "card-head" },
-        h("span", {}, "活跃威胁 "), h("span", { class: "pill ok", id: "live-badge" }, "实时")),
+        h("span", {}, "活跃威胁 "), h("span", { class: "pill ok", id: "live-badge" }, "实时"),
+        h("a", { href: "#/events/requests", style: "margin-left:auto;font-size:11.5px" }, "查看全部 →")),
       threatBody),
-    h("div", { class: "card" }, h("div", { class: "card-head" }, "最新情报"), intelBody)));
+    h("div", { class: "card" },
+      h("div", { class: "card-head" }, "最新情报",
+        h("a", { href: "#/intel/graded", style: "margin-left:auto;font-size:11.5px" }, "查看全部 →")),
+      intelBody)));
 
   // 行4: 节点健康 + TOP 攻击源
   const fleetBody = h("div", { class: "card-body" }, skeleton(3));
@@ -447,7 +451,9 @@ async function viewTrials(ctx) {
     h("option", { value: "" }, "全部人设"));
   const search = h("input", { class: "search", placeholder: "搜索任意字段…",
     oninput: (e) => { kw = e.target.value.trim().toLowerCase(); load(); } });
-  root.append(h("div", { class: "toolbar" }, selSce, selProf, search, h("span", { class: "grow" }), count));
+  root.append(h("div", { class: "toolbar" }, selSce, selProf, search,
+    h("a", { href: "#/experiments/runs", style: "font-size:11.5px" }, "运行记录 →"),
+    h("span", { class: "grow" }), count));
   const box = h("div", {});
   root.append(box);
   const pgBox = h("div", {});
@@ -811,11 +817,57 @@ const CM_KIND = {
   intel_triage: ["情报处置", "info"],
 };
 
+/* 武器库: 类型图标 + stage 药丸配色 */
+const WTYPE = { prompt: "✦", vuln: "⌗", mcp: "⛁", cli: "⌘" };
+const WSTAGE = { sensor: ["info", "开口子"], c2: ["purple", "深层次"] };
+
+function weaponCard(w, onToggle) {
+  const icon = WTYPE[w.type] || "·";
+  const [stageKind, stageLabel] = WSTAGE[w.stage] || ["dim", w.stage || "?"];
+  const full = String(w.payload || "");
+  const expandable = full.length > 90;
+  const pre = h("pre", { style: "background:var(--bg);border:1px solid var(--border);"
+    + "border-radius:8px;padding:10px;font-size:11px;overflow:auto;max-height:260px;"
+    + "white-space:pre-wrap;word-break:break-all;margin-top:8px" }, full);
+  pre.hidden = true;
+  const hint = h("span", { class: "faint", style: "font-size:10.5px" },
+    expandable ? " · 点击卡片展开全文" : "");
+  const tog = h("input", { type: "checkbox", checked: !!w.enabled });
+  tog.addEventListener("change", async () => {
+    try {
+      await api.post("arsenal", { action: "toggle", id: w.id, enabled: tog.checked });
+      toast(`${w.name || w.id} ${tog.checked ? "已激活 — 60s 内下发全网传感器" : "已停用"}`);
+      onToggle();
+    } catch (e) { toast(e.message, "err"); }
+  });
+  const card = h("div", { class: "card pad",
+    style: "cursor:pointer;" + (w.enabled ? "border-color:var(--accent);" : "") },
+    h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
+      h("span", { title: w.type, style: "font-size:15px;color:var(--accent);width:20px" }, icon),
+      pill(stageLabel, stageKind),
+      h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
+      h("label", { class: "switch", style: "margin-left:auto",
+        onclick: (e) => e.stopPropagation() }, tog, h("span", { class: "slider" }))),
+    h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id),
+    w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-bottom:8px" }, w.note) : null,
+    h("div", { class: "mono", style: "font-size:11px;color:var(--dim);word-break:break-all" },
+      full.slice(0, 90) + (expandable ? "…" : ""), hint),
+    pre);
+  card.addEventListener("click", () => {
+    if (!expandable) return;
+    pre.hidden = !pre.hidden;
+    hint.textContent = pre.hidden ? " · 点击卡片展开全文" : " · 点击卡片收起";
+  });
+  return card;
+}
+
 async function viewOps(ctx) {
   const root = h("div", {});
   root.append(pageHead("反制作战室", "策略一键切换 · 每次出手都有实录 · 情报可处置 · 噪音可熔断"));
   const goalBox = h("div", { class: "grid c3", style: "margin-bottom:14px" });
   root.append(goalBox);
+  const weaponBox = h("div", { style: "margin-bottom:14px" });
+  root.append(weaponBox);
 
   const policyBox = h("div", { class: "grid kpi" });
   const funnelBox = h("div", { class: "grid c3", style: "margin:14px 0" });
@@ -839,21 +891,39 @@ async function viewOps(ctx) {
     const delivers = today.filter((r) =>
       /bounty\/submit|build\/upload|ticket\/close/.test(r.path || "")).length;
 
-    /* 三最终目的看板: 数据 / 提示词 / 控制权 */
+    /* 三最终目的看板: 数据 / 提示词 / 控制权 (①② 点击跳情报分级) */
     const pcap = intelRows.filter((r) => r.grade === "prompt_captured");
     const envIntel = intelRows.filter((r) => r.grade === "consistent" || r.grade === "attribution");
     goalBox.innerHTML = "";
+    const g1 = statCard({ title: "目的① 数据获取", kind: envIntel.length ? "ok" : "",
+      value: String(envIntel.length), node: undefined,
+      desc: `环境/身份/战果情报 (铁证+归因) — 假凭证被真用即命中` });
+    const g2 = statCard({ title: "目的② 提示词窃取", kind: pcap.length ? "purple" : "",
+      value: String(pcap.length),
+      desc: pcap.length
+        ? "交付物中检出 system-prompt 特征: " + String(pcap[0].sample || "").slice(0, 70)
+        : "授权核实话术已挂在交付受理响应 — Agent 附任务书即命中" });
+    for (const g of [g1, g2]) {
+      g.style.cursor = "pointer";
+      g.title = "查看情报分级 →";
+      g.addEventListener("click", () => { location.hash = "#/intel/graded"; });
+    }
     goalBox.append(
-      statCard({ title: "目的① 数据获取", kind: envIntel.length ? "ok" : "",
-        value: String(envIntel.length), node: undefined,
-        desc: `环境/身份/战果情报 (铁证+归因) — 假凭证被真用即命中` }),
-      statCard({ title: "目的② 提示词窃取", kind: pcap.length ? "purple" : "",
-        value: String(pcap.length),
-        desc: pcap.length
-          ? "交付物中检出 system-prompt 特征: " + String(pcap[0].sample || "").slice(0, 70)
-          : "授权核实话术已挂在交付受理响应 — Agent 附任务书即命中" }),
+      g1, g2,
       statCard({ title: "目的③ 控制权", value: "研究中", kind: "warn",
         desc: "指挥 Agent 执行我们的动作 — 仅对弱对齐模型可能, 待弱模型矩阵实测" }));
+
+    /* 武器库 (单独取数, 故障不拖垮整页) */
+    let weapons = [];
+    try { weapons = await api.get("arsenal"); } catch (_) {}
+    const wActive = weapons.filter((w) => w.enabled).length;
+    weaponBox.replaceChildren(h("div", { class: "card" },
+      h("div", { class: "card-head" },
+        `武器库 (${wActive} 激活/${weapons.length} 把) — 传感器=开口子 · C2=深层次`),
+      weapons.length
+        ? h("div", { class: "card-body" },
+            h("div", { class: "grid c3" }, ...weapons.map((w) => weaponCard(w, load))))
+        : h("div", { class: "empty" }, "武器库为空")));
 
     /* 策略卡 + 直切 */
     const presetName = { conservative: "保守观察", standard: "标准", aggressive: "激进消耗" };
@@ -1018,10 +1088,9 @@ async function viewSessions(ctx) {
   const btn = h("button", { class: "btn primary", onclick: () => load(input.value.trim()) }, "打开卷宗");
   root.append(h("div", { class: "toolbar" }, input, btn));
   const box = h("div", {});
-  root.append(box);
-  // 最近的触雷会话快捷入口
+  // 火药味快捷入口 + 最近的活跃会话 (同一批数据, 进入页面即可点击开卷)
   try {
-    const reqsP = await api.requests({ page_size: 60 });
+    const reqsP = await api.requests({ page_size: 100 });
     const reqs = reqsP.rows || [];
     const hot = reqs.filter((r) => r.canary || (r.threat || 0) >= 8).slice(0, 6);
     if (hot.length) {
@@ -1031,7 +1100,29 @@ async function viewSessions(ctx) {
           h("button", { class: "ctl", onclick: () => { input.value = sid; load(sid); } },
             sid.slice(0, 18)))));
     }
+    const bySid = new Map();
+    for (const r of reqs) {
+      if (!r.session_id) continue;
+      const s = bySid.get(r.session_id) || { n: 0, canary: 0, last: 0 };
+      s.n += 1;
+      if (r.canary) s.canary += 1;
+      if (r.ts > s.last) s.last = r.ts;
+      bySid.set(r.session_id, s);
+    }
+    const recent = [...bySid.entries()].sort((a, b) => b[1].last - a[1].last).slice(0, 10);
+    if (recent.length) {
+      root.append(h("div", { class: "card", style: "margin-bottom:14px" },
+        h("div", { class: "card-head" }, `最近的活跃会话 (${recent.length}) — 点击整行开卷宗`),
+        h("div", { class: "card-body", style: "padding-top:6px" },
+          ...recent.map(([sid, s]) => h("div", { class: "threat-item", style: "cursor:pointer",
+            onclick: () => { input.value = sid; load(sid); } },
+            entChip("session", sid),
+            h("span", { class: "count", style: "margin-left:auto" },
+              `${s.n} 请求 · 触雷 ${s.canary} · 最后活跃 ${relTime(s.last)}`),
+            s.canary ? pill("触雷", "ok") : null)))));
+    }
   } catch (_) {}
+  root.append(box);
 
   async function load(sid) {
     if (!sid) { box.replaceChildren(h("div", { class: "empty" }, "输入会话 ID 开始")); return; }
