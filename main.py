@@ -465,6 +465,7 @@ async def handle_http_request(reader, writer, port: int = 8080):
             path=path,
             world=world,
         )
+
     except Exception as e:
         cm_result = None
 
@@ -473,6 +474,15 @@ async def handle_http_request(reader, writer, port: int = 8080):
     ai_marker = "[AI]" if is_ai else "    "
     family_str = str([f.value if hasattr(f, 'value') else str(f) for f in families]) if families else "[]"
     agent_str = str(agent_type.value if hasattr(agent_type, "value") else agent_type)
+    # 行为指纹: 脚本判定 → 动作出口 (限流动作低风险, 授权矩阵 allow)
+    if agent_str == "script":
+        try:
+            from core.action_sink import emit as action_emit
+            action_emit("llm_script_detected", "throttle",
+                        {"session": sess_id, "client_ip": client_ip,
+                         "threat": threat_score})
+        except Exception:
+            pass
     _record_request(sess_id=sess_id, client_ip=client_ip, method=method,
                     full_path=full_path, user_agent=user_agent, is_ai=is_ai,
                     agent_type=agent_str, threat=threat_score,
@@ -593,6 +603,15 @@ async def handle_http_request(reader, writer, port: int = 8080):
                         {"field": "env", "grade": g, "hash": h})
                     _record_intel(sess_id=sess_id, field="env", grade=g, hash_key=h,
                                   sample=decoded[:200], shared=shared)
+                    # P0 动作出口: 情报分级 → 授权矩阵 → webhook
+                    try:
+                        from core.action_sink import emit as action_emit
+                        action_emit(g, "block", {
+                            "session": sess_id, "hash": h, "sample": decoded[:120],
+                            "grade": g,
+                        })
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

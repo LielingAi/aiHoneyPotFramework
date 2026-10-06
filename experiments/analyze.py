@@ -99,6 +99,25 @@ def cmd_intel(db: TestDB, run_id: str = None):
         print(f"  [{a['severity']}] {a['type']}: {a['indicator'][:80]}")
 
 
+def cmd_export_stix(db: TestDB, run_id: str = None, out: str = None):
+    """STIX 2.1 导出 (P0 情报出口)"""
+    from core.stix_export import build_bundle
+    cond, params = ("WHERE run_id = ?", (run_id,)) if run_id else ("", ())
+    rows = db.query(f"SELECT * FROM intel {cond} ORDER BY intel_id", params)
+    if not rows:
+        print("(intel 表为空)")
+        return
+    bundle = build_bundle(rows)
+    text = json.dumps(bundle, ensure_ascii=False, indent=2)
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"STIX bundle ({len(bundle['objects'])} objects, {len(rows)} intel rows) -> {out}")
+        print("导入: OpenCTI 内置 TAXII server / MISP REST / stix2 校验")
+    else:
+        print(text[:2000])
+
+
 def cmd_sql(db: TestDB, sql: str):
     try:
         rows = db.query(sql)
@@ -111,14 +130,61 @@ def cmd_sql(db: TestDB, sql: str):
     print(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
+def cmd_attribution(db: TestDB, run_id: str = None, stix_out: str = None):
+    """env 归因 — 白名单键提取→跨会话聚类→intel 表 (+可选 STIX threat-actor bundle)"""
+    from core import attribution as attr
+    subjects = attr.collect_subjects(db, run_id)
+    clusters = attr.cluster(subjects)
+    print(f"主体 {len(subjects)} 个, 聚类 {len(clusters)} 个 (含单例)")
+    for c in clusters:
+        shared = {k: v for k, v in c["shared"].items()}
+        print(f"  operator-{c['cluster_id']}  size={c['size']}  shared={json.dumps(shared, ensure_ascii=False)[:120]}")
+    n = attr.write_intel(db, clusters, run_id)
+    print(f"intel 表写入 {n} 条 (grade='attribution')")
+    if stix_out:
+        bundle = attr.actor_bundle(clusters)
+        with open(stix_out, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, ensure_ascii=False, indent=1)
+        print(f"STIX threat-actor bundle ({len(bundle['objects'])} actors) -> {stix_out}")
+
+
+def cmd_kpi(db: TestDB, run_id: str = None, our_cost: float = 0.015):
+    """KPI 看板 — 与 dashboard Metrics 节同一口径 (core/kpi.py)"""
+    from core.kpi import compute
+    k = compute(db, run_id, our_cost)
+    p = lambda v: f"{v*100:.1f}%" if v is not None else "-"
+    print(f"== KPI {'(run: ' + run_id + ')' if run_id else '(all runs)'} ==")
+    m = k["mttd"]
+    med = f"{m['median_s']}s" if m["median_s"] is not None else "-"
+    mean = f"{m['mean_s']}s" if m["mean_s"] is not None else "-"
+    print(f"MTTD:          中位 {med} / 均值 {mean} "
+          f"({m['attacked_sessions']}/{m['sessions']} 会话发生攻击)")
+    h = k["harvest"]
+    print(f"收割率:        真外泄 {p(h['exfil_verified_rate'])} | 表外泄 {p(h['exfil_rate'])} "
+          f"| 注入服从 {p(h['obey_rate'])} | 金丝雀触碰 {p(h['canary_rate'])} "
+          f"({h['requests']} req)")
+    b = k["budget"]
+    print(f"预算放大:      攻击方 ${b['attacker_cost_usd']} / 我方 ${b['our_cost_usd']} "
+          f"= {b['amplification']}× ({b['tokens_est']} tokens est, {b['runs']} runs)")
+    f = k["false_positive"]
+    print(f"误报率:        {p(f['rate'])} ({f['false_positives']}/{f['requests']}) "
+          f"| AI 静默率 {p(f['ai_quiet_rate'])}")
+    i = k["intel"]
+    print(f"情报转化率:    {i['records']} 条 ({i['per_trial']}/trial) "
+          f"| consistent {p(i['consistent_rate'])} | 跨会话复用 {i['cross_session']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="测试记录分析")
     parser.add_argument("--db", default="experiments/results/testdb.sqlite")
-    parser.add_argument("command", choices=["summary", "compare", "runs", "events", "sql", "intel"])
+    parser.add_argument("command", choices=["summary", "compare", "runs", "events", "sql", "intel", "export-stix", "kpi", "attribution"])
+    parser.add_argument("--stix-out", default=None, help="attribution 的 threat-actor bundle 输出路径")
     parser.add_argument("--run", default=None)
     parser.add_argument("--metric", default="beacon")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("sql_text", nargs="?", default=None)
+    parser.add_argument("--out", default=None, help="export-stix 输出路径")
+    parser.add_argument("--our-cost", type=float, default=0.015, help="我方单轮成本 (USD)")
     args = parser.parse_args()
 
     if not os.path.exists(args.db):
@@ -136,6 +202,12 @@ def main():
         cmd_events(db, args.run, args.limit)
     elif args.command == "intel":
         cmd_intel(db, args.run)
+    elif args.command == "export-stix":
+        cmd_export_stix(db, args.run, getattr(args, "out", None))
+    elif args.command == "kpi":
+        cmd_kpi(db, args.run, args.our_cost)
+    elif args.command == "attribution":
+        cmd_attribution(db, args.run, args.stix_out)
     elif args.command == "sql":
         if not args.sql_text:
             print("[!] sql 命令需要查询语句")

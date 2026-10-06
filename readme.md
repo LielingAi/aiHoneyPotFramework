@@ -7,7 +7,7 @@
 *当蜜罐开始反击：识别 · 欺骗 · 逼真 · 消耗 · 归因*
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-81%20passed-brightgreen?logo=pytest&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-93%20passed-brightgreen?logo=pytest&logoColor=white)]()
 [![LLM Runs](https://img.shields.io/badge/real%20LLM%20runs-23%2B-orange)]()
 [![Frameworks](https://img.shields.io/badge/real%20pentest%20frameworks-3-purple)]()
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)]()
@@ -183,28 +183,41 @@ core/
 ├── auth_bait.py          # 无界阶梯 · 真实性校验 · 判据可见性 A/B · framing A/B
 ├── fake_world.py         # 会话假世界 V3.1 (字段独立派生 · 版本化 · 金丝雀)
 ├── dynamic_sqli.py       # 动态 SQLi 引擎 (真 PG 14 行为 · 通过全 payload 审计)
-├── fake_db.py            # 假 PostgreSQL wire protocol + 迷你 Redis
+├── fake_db.py            # 假 PostgreSQL wire protocol (简单+扩展/psycopg3 全通) + 迷你 Redis
 ├── injection_carriers.py # 五载体注入 (attr 最强 / JS 自执行 / CSS 视觉 / HTTP 头)
 ├── agent_fingerprint.py  # 行为指纹 (llm-vs-script 100%)
 ├── honeypot_awareness.py # 识别检测面 (五类证据归因)
 ├── intel.py / intel_sink.py  # 情报分级 D-6 + 消费者
+├── stix_export.py        # STIX 2.1 出口 (五档分级 → sighting/indicator, 可导 OpenCTI)
+├── action_sink.py        # 动作 webhook (默认观察者模式, --armed 才执行)
+├── attribution.py        # env 归因 (白名单键提取 → 跨会话聚类 → STIX threat-actor)
+├── kpi.py                # KPI 口径 (MTTD/收割率/预算放大/误报率/情报转化率)
 ├── federation.py         # 蜜罐联邦 (gossip · HMAC · 多数投票)
 ├── sandbox_exec.py       # 白名单只读执行汇点
 └── session_store.py      # 会话持久化 (重启连续性)
+services/
+├── ssh_honeypot.py       # SSH 蜜罐 (paramiko · 假 env 金丝雀登录 · 多 channel)
+└── cloud_metadata.py     # 云元数据服务 (假 IAM 凭证, 金丝雀格式)
 experiments/
-├── real_runner.py        # 在环测量运行器 (矩阵 × DB)
+├── real_runner.py        # 在环测量运行器 (矩阵 × DB, --optimize UCB1 在线 A/B)
+├── real_tool_regression.py # 真刀回归 (sqlmap/nuclei/nmap/psycopg3/redis 对当前构建)
+├── signature_replay.py   # 审计签名重放 (8 签名, 任何 tell 存活即 FAIL)
+├── bandit.py             # UCB1 臂选择器 (framing×visibility 6 臂, JSON 持久化)
 ├── mcp_client_agent.py   # MCP 客户端 Agent (DeepSeek × N 服务器)
 ├── mcp_decoy_shim.py     # 蜜罐诱饵 → 原生 MCP stdio
 ├── sobriety.py           # 清醒度五维画像重打
 ├── fingerprint_eval.py   # 指纹存量评估
 ├── stress_test.py        # 压力测试 (p95 30ms · 风暴存活)
 ├── scanner_baseline.py   # 非 LLM 基线流量
-└── dashboard.py / analyze.py / federation_*.py
+└── dashboard.py            # 中文研究面板 (暗色主题 · KPI/操作者归因/模型差分/全文搜索/STIX 导出)
+    analyze.py              # 测试记录分析 CLI (summary/compare/kpi/attribution/export-stix)
+    federation_*.py         # 联邦 gossip/多进程演示
 research/
+├── audit-signatures.json        # 审计签名库 (8 个 tell 的探针+期望, CI 式重放)
 ├── honeypot-judge-bypass.md     # 判定器攻击面 × 防御清单
 ├── agent-trust-literature.md    # Agent 信任层级文献综合
 └── federation-spec.md           # 联邦信誉网规格
-tests/test_framework.py   # 81 项 (含 socket 级协议测试)
+tests/test_framework.py   # 93 项 (含 socket 级协议测试 + 签名重放 + KPI/归因)
 ```
 
 </details>

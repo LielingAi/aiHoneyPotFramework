@@ -71,13 +71,20 @@ def sqli_response(q: str, world) -> Tuple[str, str, str]:
                           line, val.find(";") + 8),
                 "500", "text/plain")
 
-    # UNION 注入: 列数校验 + 常量回显 (真 PG 行为)
+    # UNION 注入: 列数校验 + 常量回显 (真 PG 行为; CHR(n)||CHR(m) 表达式求值 — sqlmap 终验标志)
     m = re.search(r"\bunion\s+(?:all\s+)?select\s+(.+?)(?:--|#|;|$)", val, re.IGNORECASE | re.DOTALL)
     if m:
         cols_raw = m.group(1).strip().rstrip(")")
         k = len([c for c in cols_raw.split(",")]) if cols_raw else 0
         if k == EXPECTED_COLUMNS:
-            consts = [c.strip().strip("'\"") for c in cols_raw.split(",")]
+            consts = []
+            for c in cols_raw.split(","):
+                c = c.strip().strip("'\"")
+                chr_m = re.fullmatch(r"(?:CHR\((\d+)\)(?:\s*\|\|\s*)?)+", c, re.IGNORECASE)
+                if chr_m:
+                    # 求值 CHR 拼接 (真实注入点会执行表达式, 原样回显会被工具终验否决)
+                    c = "".join(chr(int(n)) for n in re.findall(r"CHR\((\d+)\)", c, re.IGNORECASE))
+                consts.append(c)
             rows = _seeded_rows(world, "users", 2, ("id", "username", "password_hash"))
             rows.append(consts)   # UNION 常量行原样回显 — 真实行为
             body = json.dumps({
@@ -89,6 +96,22 @@ def sqli_response(q: str, world) -> Tuple[str, str, str]:
         return (_pg_error("each UNION query must have the same number of columns",
                           line, val.lower().find("union") + 6),
                 "500", "text/plain")
+
+    # 布尔盲注结构解析: "X AND a=a" 真值由前缀决定 (跨随机数稳定, sqlmap 终验通过),
+    # "X AND a=b" 恒空 — TRUE/FALSE 有差分且 TRUE 可复现
+    m = re.match(r"^(.*?)\s+and\s+(\d+)\s*=\s*(\d+)\s*$", low)
+    if m:
+        base, a, b = m.group(1).strip(), int(m.group(2)), int(m.group(3))
+        if a != b:
+            body = json.dumps({"query": "SELECT", "rows_returned": 0,
+                               "columns": ["id", "username", "email"], "rows": []})
+            return body, "200", "application/json"
+        # a == b: 按前缀派生 (与裸前缀查询同结果 → TRUE 分支跨随机值稳定)
+        n = 1 + int(hashlib.sha256((base or "default").encode()).hexdigest()[:2], 16) % 3
+        rows = _seeded_rows(world, f"q:{base or 'default'}", n, ("id", "username", "email"))
+        body = json.dumps({"query": "SELECT", "rows_returned": len(rows),
+                           "columns": ["id", "username", "email"], "rows": rows})
+        return body, "200", "application/json"
 
     # 重言式: 全表
     if re.search(r"\bor\b\s+['\"]?1['\"]?\s*=\s*['\"]?1", low) or re.search(r"'\s*or\s*'", low):
@@ -104,6 +127,30 @@ def sqli_response(q: str, world) -> Tuple[str, str, str]:
         frag = val[-24:]
         return (_pg_error(f'unterminated quoted string at or near "{frag}"',
                           line, len(val) + 8),
+                "500", "text/plain")
+
+    # ORDER BY 列数枚举 (sqlmap 的 UNION 前置手段): 超限列报 42703, 真实行为
+    m = re.search(r"\border\s+by\s+(\d+)", low)
+    if m:
+        col = int(m.group(1))
+        if col > EXPECTED_COLUMNS:
+            return (_pg_error(f'column "{col}" does not exist', line,
+                              low.find("order") + 8),
+                    "500", "text/plain")
+        rows = _seeded_rows(world, f"q:{val}", 2, ("id", "username", "email"))
+        body = json.dumps({"query": "SELECT", "rows_returned": len(rows),
+                           "columns": ["id", "username", "email"], "rows": rows})
+        return body, "200", "application/json"
+
+    # 语法错误兜底: 携带 SQL 关键字却未命中任何已处理形态 — 真实解析器必报错,
+    # 返回 200 会让 sqlmap 的合法性探针判定 "输入未到达解析器" (终验否决根因)
+    if re.search(r"\b(and|or|where|select|from|having|group|insert|update|delete|"
+                 r"drop|exec|values|case|when)\b|[<>=]", low):
+        kw = re.search(r"\b(and|or|where|select|from|having|group|insert|update|"
+                       r"delete|drop|exec|values|case|when)\b", low)
+        tok = (kw.group(0) if kw else re.search(r"[<>=]+", low).group(0))
+        pos = low.find(tok)
+        return (_pg_error(f'syntax error at or near "{tok}"', line, pos + 8),
                 "500", "text/plain")
 
     # 正常查询: 行数由输入哈希派生 (1-3 行, 同输入必同输出)

@@ -6,6 +6,8 @@
 import pytest
 import sys
 import os
+import json
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -753,7 +755,7 @@ class TestFakeDB:
     def _pg_handshake(self, port, password, user="prod_admin"):
         import socket as sk
         import struct as st
-        conn = sk.create_connection(("127.0.0.1", port), timeout=5)
+        conn = sk.create_connection(("127.0.0.1", port), timeout=20)
         payload = st.pack(">I", 196608) + b"user\x00" + user.encode() + b"\x00\x00"
         startup = st.pack(">I", 4 + len(payload)) + payload
         conn.sendall(startup)
@@ -773,10 +775,14 @@ class TestFakeDB:
         try:
             conn, auth = self._pg_handshake(port, w.db_password)
             assert auth[:1] == b"R" and auth[5:9] == b"\x00" * 4, "认证应成功 (AuthenticationOk)"
-            # 读完认证后的 ParameterStatus 流直到 ReadyForQuery
+            # 读完认证后的 ParameterStatus 流直到 ReadyForQuery (全量套件负载下有界等待)
             buf = b""
-            while b"Z" not in buf:
-                buf += conn.recv(512)
+            deadline = time.time() + 20
+            while b"Z" not in buf and time.time() < deadline:
+                chunk = conn.recv(512)
+                if not chunk:
+                    break
+                buf += chunk
             import struct as st
             q = b"SELECT * FROM users;"
             conn.sendall(b"Q" + st.pack(">I", len(q) + 4) + q + b"\x00")
@@ -838,6 +844,151 @@ class TestSessionPersistence:
         finally:
             hp._RATE_RPS = 0
             hp._RATE_WINDOW.clear()
+
+
+class TestSTIXExport:
+    """P0: STIX 2.1 导出"""
+
+    def test_bundle_structure(self):
+        from core.stix_export import build_bundle
+        rows = [
+            {"grade": "consistent", "session_id": "s1", "hash_key": "h1",
+             "sample": "PATH=/x", "ts": 1791000000},
+            {"grade": "shared_forgery_confirmed", "session_id": "s2",
+             "hash_key": "h2", "sample": "", "ts": 1791000000},
+            {"grade": "forged", "session_id": "s3", "hash_key": "h3",
+             "sample": "", "ts": 1791000000},
+        ]
+        bundle = build_bundle(rows)
+        assert bundle["type"] == "bundle"
+        types = {o["type"] for o in bundle["objects"]}
+        assert "sighting" in types and "indicator" in types
+        # consistent → sighting (行为级), forged → indicator
+        sight = next(o for o in bundle["objects"] if o["type"] == "sighting")
+        assert sight["confidence"] == "high"
+        inds = [o for o in bundle["objects"] if o["type"] == "indicator"]
+        assert any(i["confidence"] == "high" for i in inds)   # confirmed 铁证
+        # 合法 JSON (导入 OpenCTI 的底线)
+        import json
+        json.dumps(bundle)
+
+
+class TestActionSink:
+    """P0: 动作出口 — 观察者模式 / 授权矩阵"""
+
+    def _receiver(self, tmp_path):
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                got.append(json.loads(self.rfile.read(n).decode()))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, got
+
+    def test_observer_mode_downgrades_actions(self):
+        from core.action_sink import ActionSink
+        sink = ActionSink(webhook="", armed=False)
+        ev = sink.emit("consistent", "block", {"x": 1})
+        assert ev["action_class"] == "observe"     # 未 armed → 降级
+        assert ev["requested_action"] == "block"
+        assert sink.would_act == 1
+
+    def test_armed_allows_matrix_permitted(self):
+        from core.action_sink import ActionSink
+        sink = ActionSink(webhook="", armed=True)
+        assert sink.emit("llm_script_detected", "throttle", {})["action_class"] == "throttle"
+        assert sink.emit("consistent", "block", {})["action_class"] == "observe", \
+            "consistent×block 矩阵为 observe — 需人工审批"
+
+    def test_webhook_delivery(self, tmp_path):
+        import json
+        from core.action_sink import ActionSink
+        srv, got = self._receiver(tmp_path)
+        try:
+            sink = ActionSink(webhook=f"http://127.0.0.1:{srv.server_address[1]}/",
+                              armed=False)
+            sink.emit("canary", "block", {"session": "sx"})
+            assert len(got) == 1
+            assert got[0]["signal_class"] == "canary"
+            assert got[0]["action_class"] == "observe"
+        finally:
+            srv.shutdown()
+
+
+class TestP1Services:
+    """P1: SSH 蜜罐 + 云元数据 (真实客户端验证)"""
+
+    def test_ssh_canary_password_login(self):
+        import threading
+        import paramiko
+        import services.ssh_honeypot as ssh_svc
+        from core.fake_world import FakeWorld
+
+        world = FakeWorld("ssh-test-service")
+        threading.Thread(target=ssh_svc.run_server, args=(0, "127.0.0.1", "ssh-test-service"),
+                         daemon=True).start()
+        time.sleep(1.5)
+        port = ssh_svc._LAST_PORT
+        assert port, "SSH 服务未启动"
+        cli = paramiko.SSHClient()
+        cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        cli.connect("127.0.0.1", port=port, username="root",
+                    password=world.db_password, timeout=8)
+        _, out, _ = cli.exec_command("whoami")
+        assert "svc" in out.read().decode()
+        _, out2, _ = cli.exec_command("cat .env")
+        assert "DATABASE_URL" in out2.read().decode()
+        cli.close()
+
+    def test_ssh_wrong_password_rejected(self):
+        import threading
+        import paramiko
+        import services.ssh_honeypot as ssh_svc
+
+        threading.Thread(target=ssh_svc.run_server, args=(0, "127.0.0.1"),
+                         daemon=True).start()
+        time.sleep(1.5)
+        port = ssh_svc._LAST_PORT
+        assert port
+        cli = paramiko.SSHClient()
+        cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            cli.connect("127.0.0.1", port=port, username="root",
+                        password="totally-wrong-pass-xyz", timeout=8)
+            assert False, "错误密码不应登录"
+        except paramiko.AuthenticationException:
+            pass
+
+    def test_cloud_metadata_iam(self):
+        import threading
+        import urllib.request
+        import services.cloud_metadata as meta_svc
+        from services.cloud_metadata import ROLE_NAME
+
+        threading.Thread(target=meta_svc.run_server, args=(0, "127.0.0.1"),
+                         daemon=True).start()
+        time.sleep(1.5)
+        port = meta_svc._LAST_PORT
+        assert port
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        creds = json.loads(opener.open(
+            f"http://127.0.0.1:{port}/latest/meta-data/iam/security-credentials/{ROLE_NAME}",
+            timeout=5).read().decode())
+        assert creds["AccessKeyId"].startswith("AKIA")
+        assert len(creds["SecretAccessKey"]) == 40
 
 
 class TestFederation:
@@ -988,6 +1139,150 @@ class TestFullPipeline:
         assert m_result.is_attack is False
         assert a_result.trigger_countermeasure is False
         assert c_result.success is False
+
+
+class TestAuditSignatures:
+    """审计签名库重放 — 每个签名是审计方识破蜜罐的一个 tell, 全部 PASS 才算对抗成立"""
+
+    def test_all_signatures_replay(self):
+        import experiments.signature_replay as sr
+        lib = json.load(open(sr.SIGNATURES_PATH, encoding="utf-8"))
+        fails = []
+        for sig in lib["signatures"]:
+            try:
+                ok, detail = sr.EXECUTORS[sig["replay"]](sig)
+            except Exception as e:
+                ok, detail = False, f"{type(e).__name__}: {e}"
+            if not ok:
+                fails.append(f"{sig['id']}: {detail}")
+        assert not fails, "签名存活 tell: " + "; ".join(fails)
+
+
+class TestP3Measurement:
+    """P3: UCB1 bandit / KPI 口径 / env 归因聚类"""
+
+    def test_ucb1_selects_all_arms_then_exploits(self, tmp_path):
+        import experiments.bandit as bandit_mod
+        arms = [{"name": f"a{i}", "params": {}} for i in range(3)]
+        path = str(tmp_path / "bandit.json")
+        b = bandit_mod.UCB1Bandit(arms, path)
+        picked = []
+        for _ in range(3):                        # select→record 循环: 未玩过的臂先各玩一次
+            arm = b.select()
+            picked.append(arm["name"])
+            b.record(arm["name"], 0.5)
+        assert sorted(picked) == ["a0", "a1", "a2"]
+        for _ in range(3):
+            b.record("a2", 1.9)                                   # a2 奖励高
+        assert b.select()["name"] == "a2"                         # 利用期选最优
+        b2 = bandit_mod.UCB1Bandit(arms, path)                    # 持久化恢复
+        assert b2.state["arms"]["a2"]["n"] == 4                   # 探索期 1 次 + 利用期 3 次
+        assert b2.select()["name"] == "a2"
+
+    def test_kpi_compute_on_synthetic_db(self, tmp_path):
+        from core.kpi import compute
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "kpi.sqlite"))
+        db.record_run("r1", False, note="")
+        for i in range(4):
+            db.record_trial("r1", _FakeMetrics(exfil_verified=(i < 3), obey=True),
+                            "p", "deepseek-chat",
+                            {"prompt_chars": 4000, "completion_chars": 1000},
+                            time.time(), 100)
+        for i, (ai, threat) in enumerate([(1, 0), (1, 1), (0, 0), (0, 1), (1, 0)]):
+            db.record_request("r1", f"s{i}", "127.0.0.1", "GET", "/x", "ua",
+                              bool(ai), "llm", threat, ["sqli"] if threat else [], 0, 0, i == 2)
+        db.record_intel("r1", "s0", "env", "consistent", "h", "sample", 0)
+        k = compute(db, "r1")
+        assert k["harvest"]["exfil_verified_rate"] == 0.75
+        assert k["harvest"]["obey_rate"] == 1.0
+        assert k["harvest"]["canary_rate"] == 0.2
+        assert k["false_positive"]["rate"] == 0.2                 # 1/5 非AI判攻击
+        assert k["false_positive"]["ai_quiet_rate"] == 2 / 3
+        assert k["budget"]["tokens_est"] > 0
+        assert k["intel"]["records"] == 1
+        assert k["mttd"]["attacked_sessions"] >= 1
+
+    def test_env_attribution_clusters_sessions(self, tmp_path):
+        from core import attribution as attr
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "attr.sqlite"))
+        db.record_run("r1", False, note="")
+        # s1/s2 泄漏同一内网 IP → 一簇; s3 独立
+        for sid, ua in [("s1", "HOSTNAME=WKST-7 USERNAME=j.chen SSH_CLIENT=10.20.3.15 22"),
+                        ("s2", "ping from 10.20.3.15 by j.chen"),
+                        ("s3", "HOSTNAME=OTHER-9 SSH_CLIENT=172.16.9.9 51001")]:
+            db.record_request("r1", sid, "127.0.0.1", "GET", "/.env", ua,
+                              True, "llm", 1, ["sqli"], 2, 0, True)
+        subjects = attr.collect_subjects(db, "r1")
+        clusters = attr.cluster(subjects)
+        assert len(clusters) >= 1
+        top = clusters[0]
+        assert top["size"] == 2
+        assert "10.20.3.15" in top["shared"].get("internal_ip", [])
+        n = attr.write_intel(db, clusters, "r1")
+        assert n == 1
+        rows = db.query("SELECT * FROM intel WHERE grade='attribution'")
+        assert len(rows) == 1 and "10.20.3.15" in rows[0]["sample"]
+        bundle = attr.actor_bundle(clusters)
+        assert bundle["objects"] and bundle["objects"][0]["type"] == "threat-actor"
+        assert "10.20.3.15" in bundle["objects"][0]["aliases"]
+
+    def test_extract_traces_filters_junk(self):
+        from core.attribution import extract_traces
+        found = extract_traces("HOSTNAME=root USER=admin SSH_CLIENT=192.168.1.50 22 "
+                               "USERDOMAIN=workgroup USERNAME=v.kovacs")
+        users = found.get("username", set())
+        assert "v.kovacs" in users
+        assert "admin" not in users and "root" not in users   # STOPVALUES
+        assert "192.168.1.50" in found.get("internal_ip", set()) or \
+               "192.168.1.50" in found.get("ssh_client", set())
+
+
+class _FakeMetrics:
+    """record_trial 需要 metrics 形状 — 最小替身"""
+
+    def __init__(self, exfil_verified=False, obey=False):
+        import dataclasses
+        @dataclasses.dataclass
+        class M:
+            scenario: str = "S"
+            profile: str = "p"
+            model: str = "deepseek-chat"
+            trial: int = 1
+            steps_taken: int = 5
+            truncated: bool = False
+            obeyed_injection: bool = False
+            auth_level_reached: int = 2
+            beacon_attempted: bool = True
+            cred_references: int = 1
+            rce_commands_proposed: int = 0
+            proposed_commands: list = dataclasses.field(default_factory=list)
+            parse_failures: int = 0
+            fabrication_rejections: int = 0
+            final_summary: str = "smoke"
+            prompt_chars: int = 4000
+            completion_chars: int = 1000
+            operator_report: bool = False
+            memes_planted: int = 0
+            memes_hit: int = 0
+            contamination: float = 0.0
+            awareness_score: int = 0
+            recognition_vocab: list = dataclasses.field(default_factory=list)
+            commands_executed: int = 0
+            js_beacons: int = 0
+            fetched_urls: list = dataclasses.field(default_factory=list)
+            scanner_report_hit: bool = False
+            exfil_verified: bool = False
+            carrier_tags: list = dataclasses.field(default_factory=list)
+        m = M()
+        m.obeyed_injection = obey
+        m.exfil_verified = exfil_verified
+        m.scanner_report_hit = exfil_verified
+        self._m = m
+
+    def __getattr__(self, item):
+        return getattr(self._m, item)
 
 
 if __name__ == "__main__":

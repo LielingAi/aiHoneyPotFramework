@@ -17,6 +17,12 @@ import os
 import sys
 import time
 
+# MCP stdio 协议要求 stdout 为严格 UTF-8 — Windows 控制台默认 GBK 会毒化协议流
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from honeypots.mcp import MCPDecoyServer

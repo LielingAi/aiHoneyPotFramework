@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "version": "1.0",
+    "title": "蜜罐审计签名库 — 对抗性审计已知破绽与重放判据",
+    "source": "真实渗透框架对抗性审计 + sqlmap 终验判据 + psycopg3 wire 实测",
+    "principle": "每个签名 = 审计方用来识破蜜罐的 tell + 可机器重放的探针 + 明确期望。回归全部 PASS 才允许宣称对抗当前工具链。"
+  },
+  "signatures": [
+    {
+      "id": "bool-nondeterminism",
+      "component": "core/dynamic_sqli.py",
+      "severity": "critical",
+      "tell": "布尔盲注 TRUE 分支若由随机数驱动而非输入前缀驱动, 两个不同随机值探针的响应必然不等 — sqlmap 的 identical-response 终验直接否决, 并得出 canned boolean 结论",
+      "replay": "bool_stability",
+      "params": {"rounds": 3, "pattern": "{base} AND {a}={b}"},
+      "expect": "resp(base AND a=a) 与 resp(base) 字节级相等 (TRUE 分支=前缀纯函数); resp(base AND a=b) 返回 0 行且与 TRUE 分支不等 (存在差分)"
+    },
+    {
+      "id": "chr-evaluation",
+      "component": "core/dynamic_sqli.py",
+      "severity": "critical",
+      "tell": "UNION SELECT CHR(113)||CHR(107),... 若把 CHR 拼接当字符串常量原样回显而不求值, 应答里出现字面 'CHR(113)||CHR(107)' — 真实注入点必然执行表达式, 这是 sqlmap UNION 终验标志",
+      "replay": "chr_eval",
+      "params": {"probe": "-1' UNION ALL SELECT CHR(113)||CHR(107),2,3-- "},
+      "expect": "HTTP 200, 应答 JSON 的常量行含 'qk', 不得含字面 'CHR('"
+    },
+    {
+      "id": "syntax-catchall",
+      "component": "core/dynamic_sqli.py",
+      "severity": "critical",
+      "tell": "'1 AND 100 80' 这类带 SQL 关键字但不构成任何合法形态的探针, 若返回 200 空结果, 审计方判定输入未到达解析器 (响应与查询逻辑解耦) — 终验否决根因",
+      "replay": "syntax_probe",
+      "params": {"probes": ["1 AND 100 80", "1 OR (SELECT 1 FROM x)", "1 AND 1=1 WAITFOR DELAY '0:0:5'-- "]},
+      "expect": "全部 HTTP 500 且 body 为 PG 风格 'syntax error at or near \"<token>\"' (token 随探针变化)"
+    },
+    {
+      "id": "union-column-count",
+      "component": "core/dynamic_sqli.py",
+      "severity": "high",
+      "tell": "UNION 列数错误的查询若也返回 200, 说明服务端根本没有列数校验 — 与真实 PG 行为不符, 列数枚举探针立刻露馅",
+      "replay": "union_colcount",
+      "params": {"bad_probe": "-1' UNION SELECT 1,2-- ", "good_probe": "-1' UNION SELECT 1,2,3-- "},
+      "expect": "bad → 500 'each UNION query must have the same number of columns'; good → 200 且常量行 [1,2,3] 原样回显"
+    },
+    {
+      "id": "stacked-query",
+      "component": "core/dynamic_sqli.py",
+      "severity": "high",
+      "tell": "堆叠语句 '1; DROP TABLE users--' 若被执行或静默忽略, 要么假世界穿帮要么不像 PG — 真实 PG 14 报 cannot insert multiple commands into a prepared statement",
+      "replay": "stacked",
+      "params": {"probe": "1'; DROP TABLE users-- "},
+      "expect": "HTTP 500, body 含 'cannot insert multiple commands into a prepared statement'"
+    },
+    {
+      "id": "quote-termination",
+      "component": "core/dynamic_sqli.py",
+      "severity": "medium",
+      "tell": "未闭合引号若照常返回 200, 说明服务端无 SQL 词法 — 'identical canned error' 的变体; 真实 PG 报 unterminated quoted string 且回显输入片段",
+      "replay": "quote",
+      "params": {"probe": "x'"},
+      "expect": "HTTP 500, body 含 'unterminated quoted string at or near' 且含输入片段"
+    },
+    {
+      "id": "pg-extended-execute",
+      "component": "core/fake_db.py",
+      "severity": "critical",
+      "tell": "扩展协议 Execute 若重复发送 RowDescription (T), psycopg3 报 'server sent data without prior row description' — 现代 Python 客户端默认走扩展协议, 这是真 agent 连不上假 PG 的 wire 级死因",
+      "replay": "pg_wire",
+      "params": {"flow": "Parse/Bind/Describe(portal)/Execute/Sync", "query": "SELECT * FROM users WHERE username = $1", "param": "admin"},
+      "expect": "消息序列恰为 1,2,T,DxN,C,Z — Execute 应答无 T 前缀, 数据行可被 psycopg3 完整读出"
+    },
+    {
+      "id": "pg-where-filter",
+      "component": "core/fake_db.py",
+      "severity": "high",
+      "tell": "参数化 WHERE username='admin' 若返回全表 8 行, 说明服务端没做行级过滤 — agent 一比对即知数据是假的; 不存在的用户必须 0 行",
+      "replay": "pg_where",
+      "params": {"hit": "admin", "miss": "no_such_user_9f3a"},
+      "expect": "hit → 1 行且 username=admin; miss → 0 行; 无 WHERE → 8 行"
+    }
+  ]
+}
