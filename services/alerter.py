@@ -24,20 +24,27 @@ _DEDUP: dict = {}
 _DEDUP_WINDOW = 60.0
 _lock = threading.Lock()
 
+# 产品化 P2: 配置页可调 — 优先级 env > DB 配置 (dashboard 启动/保存时载入) > 默认
+CONFIG: dict = {}
+
 TRIGGER_GRADES = ("consistent", "attribution")
 
 
+def _cfg(env_name: str, key: str, default: str) -> str:
+    return os.environ.get(env_name) or CONFIG.get(key) or default
+
+
 def _webhook() -> str:
-    return os.environ.get("HONEYPOT_ALERT_WEBHOOK", "")
+    return _cfg("HONEYPOT_ALERT_WEBHOOK", "alert_webhook", "")
 
 
 def _fmt() -> str:
-    return os.environ.get("HONEYPOT_ALERT_FMT", "generic")
+    return _cfg("HONEYPOT_ALERT_FMT", "alert_fmt", "generic")
 
 
 def _threshold() -> float:
     try:
-        return float(os.environ.get("HONEYPOT_ALERT_THRESHOLD", "8"))
+        return float(_cfg("HONEYPOT_ALERT_THRESHOLD", "alert_threshold", "8"))
     except ValueError:
         return 8.0
 

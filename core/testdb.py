@@ -54,6 +54,20 @@ CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS idx_intel_run ON intel(run_id);
+
+-- 产品化 P2: fleet / 用户 / 配置 (新表, 向后兼容)
+CREATE TABLE IF NOT EXISTS sensors(
+    sensor_id TEXT PRIMARY KEY,
+    first_seen REAL, last_seen REAL, note TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS users(
+    username TEXT PRIMARY KEY,
+    password_hash TEXT, salt TEXT, role TEXT DEFAULT 'viewer',
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS settings(
+    key TEXT PRIMARY KEY, value TEXT
+);
 """
 
 
@@ -175,6 +189,94 @@ class TestDB:
                   int(r.get("shared", 0)))
                  for r in rows])
         return len(rows)
+
+    # ------------------------------------------------------------------
+    # 产品化 P2: fleet / 用户 / 配置 / 保留策略
+    # ------------------------------------------------------------------
+
+    def touch_sensor(self, sensor_id: str):
+        """ingest 时自动注册/心跳"""
+        now = time.time()
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO sensors(sensor_id, first_seen, last_seen, note)"
+                " VALUES (?,?,?,'') ON CONFLICT(sensor_id)"
+                " DO UPDATE SET last_seen=excluded.last_seen", (sensor_id, now, now))
+
+    def list_sensors(self) -> list:
+        return self.query("SELECT * FROM sensors ORDER BY last_seen DESC")
+
+    def set_sensor_note(self, sensor_id: str, note: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute("UPDATE sensors SET note=? WHERE sensor_id=?",
+                            (note[:200], sensor_id))
+            return cur.rowcount > 0
+
+    def sensor_stats(self) -> list:
+        return self.query("""
+            SELECT s.sensor_id, s.note, s.last_seen,
+                   (SELECT COUNT(*) FROM requests r
+                     WHERE r.run_id = 'sensor_' || s.sensor_id) AS total_events,
+                   (SELECT COUNT(*) FROM requests r
+                     WHERE r.run_id = 'sensor_' || s.sensor_id AND r.canary=1) AS canary_hits,
+                   (SELECT COUNT(*) FROM requests r
+                     WHERE r.run_id = 'sensor_' || s.sensor_id
+                       AND r.ts > ?) AS events_24h
+            FROM sensors s ORDER BY s.last_seen DESC""", (time.time() - 86400,))
+
+    # ---- 用户 (PBKDF2 哈希, 登录门面) ----
+
+    def create_user(self, username: str, password: str, role: str = "viewer") -> bool:
+        import hashlib
+        import secrets as _sec
+        salt = _sec.token_hex(16)
+        h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
+        with self._conn() as c:
+            c.execute("INSERT OR IGNORE INTO users(username, password_hash, salt, role, created)"
+                      " VALUES (?,?,?,?,?)", (username, h, salt, role, time.time()))
+        return True
+
+    def verify_user(self, username: str, password: str) -> dict:
+        import hashlib
+        rows = self.query("SELECT * FROM users WHERE username=?", (username,))
+        if not rows:
+            return {}
+        u = rows[0]
+        h = hashlib.pbkdf2_hmac("sha256", password.encode(),
+                                u["salt"].encode(), 120_000).hex()
+        if h == u["password_hash"]:
+            return {"username": username, "role": u["role"]}
+        return {}
+
+    def has_users(self) -> bool:
+        return bool(self.query("SELECT 1 AS x FROM users LIMIT 1"))
+
+    # ---- 配置 (告警规则/保留策略, 界面可调) ----
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        rows = self.query("SELECT value FROM settings WHERE key=?", (key,))
+        return rows[0]["value"] if rows else default
+
+    def set_setting(self, key: str, value: str):
+        with self._conn() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES (?,?)"
+                      " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (key, str(value)))
+
+    def all_settings(self) -> dict:
+        return {r["key"]: r["value"] for r in self.query("SELECT * FROM settings")}
+
+    # ---- 保留策略 ----
+
+    def purge_older_than(self, days: float) -> dict:
+        cutoff = time.time() - days * 86400
+        out = {}
+        with self._conn() as c:
+            for table, col in (("requests", "ts"), ("intel", "ts"),
+                               ("events", "ts"), ("trials", "started")):
+                cur = c.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
+                out[table] = cur.rowcount
+        return out
 
     def summary(self, run_id: str = None) -> list:
         cond = "WHERE run_id = ?" if run_id else ""

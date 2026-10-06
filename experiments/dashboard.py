@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -31,6 +32,126 @@ from core.testdb import TestDB
 DB: TestDB = None
 BANDIT_STATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "experiments", "results", "bandit_state.json")
+
+# ---- 产品化 P2: 会话 (内存, 12h 滑动过期) ----
+import secrets as _secrets
+SESSIONS: dict = {}          # token -> {"user":.., "role":.., "exp":..}
+SESSION_TTL = 12 * 3600
+COOKIE = "hp_sid"
+
+
+def _session_user(headers) -> dict:
+    cookie = headers.get("Cookie", "")
+    for part in cookie.split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == COOKIE and v in SESSIONS:
+            s = SESSIONS[v]
+            if time.time() < s["exp"]:
+                s["exp"] = time.time() + SESSION_TTL
+                return s
+            SESSIONS.pop(v, None)
+    return {}
+
+
+def _login(username: str, password: str) -> dict:
+    u = DB.verify_user(username, password)
+    if not u:
+        return {}
+    token = _secrets.token_hex(24)
+    SESSIONS[token] = {"user": u["username"], "role": u["role"],
+                       "exp": time.time() + SESSION_TTL}
+    return {"token": token, **u}
+
+
+def _masked_cfg() -> dict:
+    cfg = DB.all_settings() if DB else {}
+    wh = cfg.get("alert_webhook", "")
+    if wh and len(wh) > 8:
+        cfg["alert_webhook"] = wh[:4] + "…" + wh[-4:]
+    cfg.setdefault("alert_fmt", "generic")
+    cfg.setdefault("alert_threshold", "8")
+    cfg.setdefault("retention_days", "30")
+    return cfg
+
+
+def reltime_js(ts) -> str:
+    if not ts:
+        return "-"
+    s = max(0, time.time() - ts)
+    if s < 90:
+        return f"{s:.0f}秒前"
+    if s < 3600:
+        return f"{s/60:.0f}分钟前"
+    if s < 86400:
+        return f"{s/3600:.1f}小时前"
+    return f"{s/86400:.1f}天前"
+
+
+def _situation() -> dict:
+    now = time.time()
+    rows = DB.query("SELECT ts FROM requests WHERE ts > ?", (now - 86400,))
+    hist = [0] * 24
+    for r in rows:
+        age_h = int((now - r["ts"]) // 3600)
+        if 0 <= age_h < 24:
+            hist[23 - age_h] += 1
+    top_ips = DB.query("""
+        SELECT client_ip, COUNT(*) AS n, SUM(canary) AS canary
+        FROM requests WHERE ts > ? GROUP BY client_ip ORDER BY n DESC LIMIT 5""",
+        (now - 7 * 86400,))
+    fam = {}
+    for r in DB.query("SELECT families FROM requests WHERE ts > ? AND families != ''",
+                      (now - 7 * 86400,)):
+        for f in str(r["families"]).split(","):
+            if f.strip():
+                fam[f.strip()] = fam.get(f.strip(), 0) + 1
+    online = now - 90
+    sensors = DB.sensor_stats()
+    return {
+        "hist24": hist,
+        "total_24h": len(rows),
+        "canary_24h": DB.query("SELECT COUNT(*) AS n FROM requests"
+                               " WHERE ts > ? AND canary=1", (now - 86400,))[0]["n"],
+        "top_ips": top_ips,
+        "families": sorted(fam.items(), key=lambda kv: -kv[1])[:8],
+        "sensors_online": sum(1 for s in sensors if s["last_seen"] and s["last_seen"] > online),
+        "sensors_total": len(sensors),
+    }
+
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 蜜罐 — 登录</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:#0b0f14;font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:#dbe2ec}
+.card{background:#12161d;border:1px solid #222b38;border-radius:14px;padding:36px 40px;
+  width:320px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+h1{font-size:18px;margin:0 0 6px}.h1 b{color:#4cc2ff}
+.sub{color:#5c6879;font-size:12px;margin-bottom:24px}
+input{width:100%;box-sizing:border-box;background:#161c25;border:1px solid #222b38;
+  border-radius:8px;color:#dbe2ec;padding:10px 12px;margin:6px 0;font-size:14px;outline:none}
+input:focus{border-color:#4cc2ff}
+button{width:100%;margin-top:14px;background:rgba(76,194,255,.12);border:1px solid rgba(76,194,255,.4);
+  color:#4cc2ff;border-radius:8px;padding:10px;font-size:14px;cursor:pointer}
+button:hover{background:rgba(76,194,255,.2)}
+#err{color:#f85149;font-size:12.5px;margin-top:10px;min-height:16px}
+</style></head><body>
+<div class="card"><h1>AI <b>蜜罐</b> 控制台</h1><div class="sub">传感器网络 · 反制态势</div>
+<input id="u" placeholder="用户名" autocomplete="username">
+<input id="p" type="password" placeholder="密码" autocomplete="current-password">
+<button onclick="go()">登 录</button><div id="err"></div></div>
+<script>
+async function go(){
+  const r=await fetch("/api/login",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({username:u.value,password:p.value})});
+  if(r.ok){location.href="/";}
+  else document.getElementById("err").textContent="用户名或密码错误";
+}
+p.addEventListener("keydown",e=>{if(e.key==="Enter")go();});
+</script></body></html>"""
 
 
 def q(sql: str, params: tuple = ()) -> list:
@@ -137,29 +258,76 @@ td.num,th.num{font-family:var(--mono);text-align:right}
 .liveln b{color:var(--accent);min-width:34px}
 #livefeed{max-height:280px;overflow-y:auto}
 #livefeed .pill{flex-shrink:0}
+.sub2{font-size:11.5px;color:var(--dim);margin-bottom:8px;letter-spacing:.5px}
+.hist{display:flex;align-items:flex-end;gap:3px;height:90px}
+.hist .bar{flex:1;background:rgba(76,194,255,.35);border-radius:3px 3px 0 0;
+  min-height:2px;position:relative;transition:height .5s}
+.hist .bar:hover{background:var(--accent)}
+.hist .bar .tip{position:absolute;bottom:100%;left:50%;transform:translateX(-50%);
+  font-size:10px;color:var(--fg);background:var(--panel2);padding:1px 6px;
+  border-radius:4px;display:none;white-space:nowrap}
+.hist .bar:hover .tip{display:block}
+.iprow{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:12.5px}
+.iprow .bar{height:10px;background:rgba(248,81,73,.5);border-radius:3px;min-width:4px}
+.iprow .mono{width:120px;overflow:hidden;text-overflow:ellipsis}
+.cfgrow{display:flex;align-items:center;gap:12px;margin:10px 0}
+.cfgrow label{width:110px;color:var(--dim);font-size:12.5px;flex-shrink:0}
+.cfgrow input,.cfgrow select{flex:1;background:var(--panel2);color:var(--fg);
+  border:1px solid var(--border);border-radius:7px;padding:8px 10px;font-size:13px}
+.cfgrow input:disabled,.cfgrow select:disabled{opacity:.45}
+.notewrap input{width:160px;padding:4px 8px;font-size:12px}
 </style></head><body>
 
 <header class="topbar">
   <span class="brand"><span class="dot"></span>AI <b>蜜罐</b>研究面板</span>
   <nav id="nav">
-    <a href="#metrics" class="on">指标总览</a><a href="#live">实时</a><a href="#bandit">演化实验</a>
+    <a href="#situation" class="on">态势</a><a href="#live">实时</a>
+    <a href="#metrics">指标总览</a><a href="#fleet">传感器</a>
+    <a href="#bandit">演化实验</a>
     <a href="#attribution">操作者归因</a><a href="#summary">汇总指标</a>
     <a href="#compare">模型差分</a><a href="#trials">试验明细</a><a href="#events">动作流水</a>
-    <a href="#intel">情报分级</a><a href="#requests">请求日志</a><a href="#runs">运行记录</a>
+    <a href="#intel">情报分级</a><a href="#requests">请求日志</a><a href="#config">配置</a>
+    <a href="#runs">运行记录</a>
   </nav>
   <div class="controls">
     <span class="dbpath">__DBPATH__</span>
+    <span class="count" id="whoami"></span>
     <select id="runsel" onchange="load()"><option value="">全部运行</option></select>
     <button onclick="load()">↻ 刷新</button>
     <button class="primary" onclick="dl_stix()">⭳ 导出情报 (STIX)</button>
+    <button onclick="logout()" id="btnlogout" style="display:none">退出</button>
   </div>
 </header>
 
 <main>
-<section id="metrics"><h2>指标总览 — 与 analyze.py kpi 同口径</h2><div class="cards" id="kpi"></div></section>
+<section id="situation"><h2>态势 — 正在被攻击吗</h2>
+  <div class="cards" id="sit_cards"></div>
+  <div class="panel" style="margin-bottom:12px"><div style="padding:10px 14px">
+    <div class="sub2">近 24 小时活动</div>
+    <div id="hist" class="hist"></div></div></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div class="panel"><div style="padding:10px 14px"><div class="sub2">TOP 攻击源 (7d)</div><div id="topips"></div></div></div>
+    <div class="panel"><div style="padding:10px 14px"><div class="sub2">攻击类型分布 (7d)</div><div id="famdist"></div></div></div>
+  </div>
+</section>
 <section id="live"><h2>实时事件流 — SSE 推送 (传感器触达即显) <span class="count" id="alertst"></span></h2>
   <div class="panel" id="livefeed"><div class="empty">等待事件… (对传感器发任意请求即出现)</div></div>
 </section>
+<section id="fleet"><h2>传感器 — 节点状态</h2><div class="panel" id="fleet_p"></div></section>
+<section id="config"><h2>配置 — 告警与保留策略</h2>
+  <div class="panel" style="padding:16px 18px;max-width:560px">
+    <div class="cfgrow"><label>告警 Webhook</label><input type="text" id="cfg_webhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."></div>
+    <div class="cfgrow"><label>格式</label><select id="cfg_fmt"><option value="generic">generic (Slack/Discord)</option><option value="dingtalk">钉钉</option></select></div>
+    <div class="cfgrow"><label>威胁阈值</label><input type="number" id="cfg_threshold" step="0.5"></div>
+    <div class="cfgrow"><label>数据保留 (天)</label><input type="number" id="cfg_retention" step="1" min="1"></div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="primary" onclick="save_config()">保存</button>
+      <button onclick="test_alert()">发送测试告警</button>
+      <span class="count" id="cfgmsg"></span>
+    </div>
+  </div>
+</section>
+<section id="metrics"><h2>指标总览 — 与 analyze.py kpi 同口径</h2><div class="cards" id="kpi"></div></section>
 <section id="bandit"><h2>演化实验 — 自动 A/B 各组合臂进展</h2><div class="panel" id="bandit_p"></div></section>
 <section id="attribution"><h2>操作者归因 — 跨会话聚类 (谁在打我们)</h2><div class="panel" id="attribution_p"></div></section>
 <section id="summary"><h2>汇总指标 — 模型 × 人设 × 场景</h2><div class="panel" id="summary_p"></div></section>
@@ -383,21 +551,117 @@ try{
   es.onmessage=(e)=>{try{liveLine(JSON.parse(e.data));}catch(_){}};
 }catch(_){}
 
-load();setInterval(()=>{if(!document.hidden)load();},8000);
+/* ---------- 态势 / 传感器 / 配置 ---------- */
+async function loadSituation(){
+  const s=await api("situation");
+  const mx=Math.max(1,...(s.hist24||[1]));
+  g("hist").innerHTML=(s.hist24||[]).map((v,i)=>{
+    const h=Math.round(v/mx*86)+4;
+    return `<div class="bar" style="height:${h}px"><span class="tip">${23-i}小时前: ${v}</span></div>`;
+  }).join("")||'<div class="empty">暂无数据</div>';
+  const card=(t,v,cls,d)=>`<div class="card ${cls||''}"><div class="t">${t}</div><div class="v">${v}</div><div class="d">${d||""}</div></div>`;
+  g("sit_cards").innerHTML=
+    card("24h 事件", s.total_24h??0, "", `触雷 ${s.canary_24h??0} 次`) +
+    card("传感器", `${s.sensors_online??0}/${s.sensors_total??0}`, "g", "在线 / 总数 (90s 心跳)");
+  const mxip=Math.max(1,...(s.top_ips||[{n:1}]).map(r=>r.n));
+  g("topips").innerHTML=(s.top_ips||[]).map(r=>
+    `<div class="iprow"><span class="mono">${esc(r.client_ip||"?")}</span>`+
+    `<span class="bar" style="width:${Math.round(r.n/mxip*140)+8}px"></span>`+
+    `<span class="count">${r.n}${r.canary?' ⚡'+r.canary:''}</span></div>`).join("")||'<div class="empty">暂无数据</div>';
+  const mxf=Math.max(1,...(s.families||[["",1]]).map(kv=>kv[1]));
+  g("famdist").innerHTML=(s.families||[]).map(([k,v])=>
+    `<div class="iprow"><span class="mono" style="width:150px">${esc(k)}</span>`+
+    `<span class="bar" style="width:${Math.round(v/mxf*140)+8}px;background:rgba(210,153,34,.5)"></span>`+
+    `<span class="count">${v}</span></div>`).join("")||'<div class="empty">暂无数据</div>';
+}
+async function loadFleet(){
+  const rows=await api("sensors");
+  const me=await api("me");
+  g("fleet_p").innerHTML=tbl(rows,[
+    {h:"节点",k:"sensor_id",f:r=>`<span class="mono">${esc(r.sensor_id)}</span>`},
+    {h:"状态",k:"online",f:r=>r.online?pill("在线","ok"):pill("离线","dim")},
+    {h:"24h 事件",k:"events_24h",num:1},
+    {h:"累计事件",k:"total_events",num:1},
+    {h:"触雷",k:"canary_hits",f:r=>r.canary_hits?`<span style="color:var(--good);font-weight:700">${r.canary_hits}</span>`:"0"},
+    {h:"最近活跃",k:"last_seen_s"},
+    {h:"备注",k:"note",f:r=>me.role==="admin"?
+      `<span class="notewrap"><input value="${esc(r.note||'')}" onchange="note_sensor('${esc(r.sensor_id)}',this.value)"></span>`:
+      esc(r.note||"")},
+  ],"暂无传感器 — 蜜罐配置 HONEYPOT_HIVE_URL 后自动注册");
+}
+async function note_sensor(id,note){
+  const r=await fetch("/api/sensors/note",{method:"POST",
+    headers:{"Content-Type":"application/json","X-Requested-With":"x"},
+    body:JSON.stringify({sensor_id:id,note})});
+  if(!(await r.json()).ok)toast("保存备注失败");
+}
+async function loadConfig(){
+  const c=await api("config");
+  const admin=c.role==="admin";
+  g("cfg_webhook").value=c.alert_webhook||"";
+  g("cfg_fmt").value=c.alert_fmt||"generic";
+  g("cfg_threshold").value=c.alert_threshold||8;
+  g("cfg_retention").value=c.retention_days||30;
+  ["cfg_webhook","cfg_fmt","cfg_threshold","cfg_retention"].forEach(id=>g(id).disabled=!admin);
+  g("whoami").textContent=admin?"":"(只读)";
+  if(c.role==="admin")g("btnlogout").style.display="";
+}
+async function save_config(){
+  const r=await fetch("/api/config",{method:"POST",
+    headers:{"Content-Type":"application/json","X-Requested-With":"x"},
+    body:JSON.stringify({alert_webhook:g("cfg_webhook").value,
+      alert_fmt:g("cfg_fmt").value,
+      alert_threshold:g("cfg_threshold").value,
+      retention_days:g("cfg_retention").value})});
+  const j=await r.json();
+  g("cfgmsg").textContent=j.saved?"已保存":"保存失败";
+  setTimeout(()=>g("cfgmsg").textContent="",2500);
+}
+async function test_alert(){
+  const r=await fetch("/api/config/test_alert",{method:"POST",
+    headers:{"X-Requested-With":"x"}});
+  const j=await r.json();
+  g("cfgmsg").textContent=j.sent?"测试告警已发送":"未发送 (检查 webhook 配置)";
+}
+async function logout(){
+  await fetch("/api/logout",{method:"POST",headers:{"X-Requested-With":"x"}});
+  location.href="/";
+}
+
+load();
+loadSituation();loadFleet();loadConfig();
+setInterval(()=>{if(!document.hidden){load();loadSituation();loadFleet();}},8000);
 </script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _session(self) -> dict:
+        return _session_user(self.headers)
+
     def _authorized(self, qs: dict) -> bool:
-        """产品化 token 鉴权: HONEYPOT_CONSOLE_TOKEN 未设 = 开放 (兼容实验态);
-        设了则 / 与 /api/* 与 /ingest 全部要求 ?token= 或 Bearer 匹配"""
+        """鉴权: 会话 cookie (人机登录) 或 ?token/Bearer (机器+书签)。
+        HONEYPOT_CONSOLE_TOKEN 未设且无用户体系 = 开放 (实验态兼容)"""
+        if self._session():
+            return True
         token = os.environ.get("HONEYPOT_CONSOLE_TOKEN", "")
+        if not token and DB and DB.has_users():
+            return False          # 已建用户则必须登录
         if not token:
             return True
         auth = self.headers.get("Authorization", "")
         if auth == f"Bearer {token}":
             return True
         return qs.get("token", [""])[0] == token
+
+    def _role(self, qs: dict) -> str:
+        s = self._session()
+        if s:
+            return s["role"]
+        token = os.environ.get("HONEYPOT_CONSOLE_TOKEN", "")
+        if token and (self.headers.get("Authorization") == f"Bearer {token}"
+                      or qs.get("token", [""])[0] == token):
+            return "admin"        # 持机器 token = 全权 (compose 场景无登录页)
+        return "viewer"
 
     def _send(self, code: int, body: bytes, ctype: str, extra=None):
         self.send_response(code)
@@ -414,10 +678,45 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
-        if parsed.path == "/ingest":
-            if not self._authorized(qs):
-                self._send(401, b'{"error":"unauthorized"}', "application/json")
+        # ---- 登录门面 (开放端点) ----
+        if parsed.path == "/api/login":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                cred = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                cred = {}
+            u = _login(cred.get("username", ""), cred.get("password", ""))
+            if not u:
+                self._send(401, b'{"error":"bad credentials"}', "application/json")
                 return
+            body = json.dumps({"ok": True, "user": u["username"],
+                               "role": u["role"]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie",
+                             f"{COOKIE}={u['token']}; HttpOnly; Path=/; SameSite=Lax;"
+                             f" Max-Age={SESSION_TTL}")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/logout":
+            s = self._session()
+            for tok, v in list(SESSIONS.items()):
+                if v is s:
+                    SESSIONS.pop(tok, None)
+            self._send(200, b'{"ok":true}', "application/json",
+                       {"Set-Cookie": f"{COOKIE}=; HttpOnly; Path=/; Max-Age=0"})
+            return
+        # ---- 以下需鉴权 ----
+        if not self._authorized(qs):
+            self._send(401, b'{"error":"unauthorized"}', "application/json")
+            return
+        # CSRF: cookie 鉴权的写操作必须带自定义头 (跨站表单发不出)
+        if not self.headers.get("X-Requested-With") and self._session():
+            self._send(403, b'{"error":"missing csrf header"}', "application/json")
+            return
+        if parsed.path == "/ingest":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length) or b"{}")
@@ -426,7 +725,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             n_req = DB.ingest_requests(payload.get("requests", []))
             n_int = DB.ingest_intel(payload.get("intel", []))
-            # P1 告警: 汇聚侧评估每条入库记录 (canary/铁证/高威胁), 去抖后推 webhook
+            for sid in {r.get("run_id", "").replace("sensor_", "", 1)
+                        for r in payload.get("requests", [])
+                        + payload.get("intel", [])
+                        if str(r.get("run_id", "")).startswith("sensor_")}:
+                DB.touch_sensor(sid)
             try:
                 from services import alerter
                 for r in payload.get("requests", []):
@@ -439,19 +742,88 @@ class Handler(BaseHTTPRequestHandler):
                                         "requests": n_req, "intel": n_int}
                                        ).encode(), "application/json")
             return
+        if parsed.path == "/api/config":
+            if self._role(qs) != "admin":
+                self._send(403, b'{"error":"admin only"}', "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                cfg = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, b'{"error":"bad json"}', "application/json")
+                return
+            for key in ("alert_webhook", "alert_fmt", "alert_threshold",
+                        "retention_days"):
+                if key in cfg:
+                    DB.set_setting(key, str(cfg[key]))
+            from services import alerter
+            alerter.CONFIG.update(DB.all_settings())
+            self._send(200, json.dumps({"saved": True, "config": _masked_cfg()}
+                                       ).encode(), "application/json")
+            return
+        if parsed.path == "/api/config/test_alert":
+            if self._role(qs) != "admin":
+                self._send(403, b'{"error":"admin only"}', "application/json")
+                return
+            from services import alerter
+            ok = alerter.maybe_alert(
+                "intel", {"grade": "consistent", "field": "test",
+                          "sample": "手动测试告警 (来自配置页)", "session_id": "config-test"})
+            self._send(200, json.dumps({"sent": bool(ok)}).encode(),
+                       "application/json")
+            return
+        if parsed.path == "/api/sensors/note":
+            if self._role(qs) != "admin":
+                self._send(403, b'{"error":"admin only"}', "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, b'{"error":"bad json"}', "application/json")
+                return
+            ok = DB.set_sensor_note(body.get("sensor_id", ""), body.get("note", ""))
+            self._send(200, json.dumps({"ok": bool(ok)}).encode(), "application/json")
+            return
         self._send(404, b"not found", "text/plain")
 
     def do_GET(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
-        if not self._authorized(qs):
-            self._send(401, b'{"error":"unauthorized"}', "application/json")
-            return
-        run = qs.get("run", [None])[0]
-        run_cond, params = ("WHERE run_id = ?", (run,)) if run else ("", ())
         if parsed.path == "/":
+            if not self._authorized(qs):
+                body = LOGIN_PAGE.encode("utf-8")
+                self._send(200, body, "text/html; charset=utf-8")
+                return
             body = PAGE.replace("__DBPATH__", DB.path).encode("utf-8")
             self._send(200, body, "text/html; charset=utf-8")
+        elif not self._authorized(qs):
+            self._send(401, b'{"error":"unauthorized"}', "application/json")
+        elif parsed.path == "/api/me":
+            s = self._session()
+            self._send(200, json.dumps(
+                {"user": s.get("user"), "role": self._role(qs),
+                 "auth": "session" if s else "token"}).encode(), "application/json")
+        elif parsed.path == "/api/config":
+            self._send(200, json.dumps(
+                {**_masked_cfg(), "role": self._role(qs)},
+                ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/sensors":
+            online = time.time() - 90
+            rows = []
+            for r in DB.sensor_stats():
+                r["online"] = r["last_seen"] and r["last_seen"] > online
+                r["last_seen_s"] = reltime_js(r["last_seen"])
+                rows.append(r)
+            self._send(200, json.dumps(rows, ensure_ascii=False).encode(),
+                       "application/json")
+        elif parsed.path == "/api/situation":
+            self._send(200, json.dumps(_situation(), ensure_ascii=False).encode(),
+                       "application/json")
+        run = qs.get("run", [None])[0]
+        run_cond, params = ("WHERE run_id = ?", (run,)) if run else ("", ())
+        if parsed.path == "/__never__":
+            pass
         elif parsed.path == "/api/events/stream":
             # P1 实时推送: SSE — 新请求事件流 (传感器汇聚后 1s 内达面板)
             self.send_response(200)
@@ -572,13 +944,35 @@ def main():
     parser = argparse.ArgumentParser(description="蜜罐研究数据面板")
     parser.add_argument("--db", default="experiments/results/testdb.sqlite")
     parser.add_argument("--port", type=int, default=8899)
+    parser.add_argument("--host", default="127.0.0.1", help="产品化暴露用 0.0.0.0")
     parser.add_argument("--bandit-state", default=None, help="UCB1 状态文件路径")
     args = parser.parse_args()
     DB = TestDB(args.db)
     if args.bandit_state:
         BANDIT_STATE = args.bandit_state
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"[Dashboard] http://127.0.0.1:{args.port}  (db: {args.db})")
+    # P2 门面: 首次启动建 admin (密码取 ADMIN_PASSWORD, 默认 admin123 并告警)
+    if not DB.has_users():
+        pw = os.environ.get("ADMIN_PASSWORD", "admin123")
+        DB.create_user("admin", pw, role="admin")
+        print(f"[AUTH] 已创建初始管理员 admin / {pw}"
+              + (" (来自 ADMIN_PASSWORD)" if os.environ.get("ADMIN_PASSWORD")
+                 else " — 生产部署请立即改密或设 ADMIN_PASSWORD"))
+    from services import alerter
+    alerter.CONFIG.update(DB.all_settings())
+    # 保留策略: 启动即清 + 每小时清理
+    def _retention_loop():
+        while True:
+            try:
+                days = float(DB.get_setting("retention_days", "30"))
+                purged = DB.purge_older_than(days)
+                if any(purged.values()):
+                    print(f"[RETENTION] 清理 >{days}d: {purged}")
+            except Exception:
+                pass
+            time.sleep(3600)
+    threading.Thread(target=_retention_loop, daemon=True).start()
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"[Dashboard] http://{args.host}:{args.port}  (db: {args.db})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

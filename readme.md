@@ -55,15 +55,19 @@
 实验态之上的一层：N 个**传感器**（蜜罐+外送器，本地不留态）→ 一个 **hive**（控制台+ingest，SQLite 汇聚）。
 
 ```bash
-export HONEYPOT_CONSOLE_TOKEN=$(openssl rand -hex 16)
+export HONEYPOT_CONSOLE_TOKEN=$(openssl rand -hex 16)   # 机器通道
+export ADMIN_PASSWORD=<强密码>                            # 首次启动建管理员 (默认 admin123 并告警)
 docker compose up -d                 # sensor + hive
 docker compose up -d --scale sensor=3   # 加传感器
-# 控制台: http://<hive>:8899/?token=$HONEYPOT_CONSOLE_TOKEN
+# 控制台: http://<hive>:8899  → 登录页 (admin 账号)
 ```
 
+- **登录门面**：PBKDF2 密码哈希 + HttpOnly 会话 cookie (12h)；人机走登录，传感器/自动化走 Bearer token；viewer 只读 / admin 可配置
+- **态势首页**：24h 活动直方图 · TOP 攻击源 · 攻击类型分布 · 在线传感器数 — 首屏回答"正在被攻击吗"
+- **Fleet 管理**：传感器接入即自动注册，90s 心跳在线状态，每节点事件/触雷/最近活跃统计，备注可编辑
+- **配置页**（入库可调）：告警 webhook/格式/威胁阈值、数据保留天数；`env > 界面配置 > 默认` 优先级；测试告警按钮；每小时自动清理过期数据
 - **传感器外送** `services/sensor_shipper.py`：事件批量送 hive（2s/50 条 flush），断网落 spool 恢复后补发；蜜罐热路径仅一次 queue.put
 - **hive 接入**：`POST /ingest`（Bearer 鉴权，批量写同一 schema，sensor_id 入 run_id 列区分来源，原始时间戳保留）
-- **控制台鉴权**：`HONEYPOT_CONSOLE_TOKEN` 未设=开放（兼容实验态），设了则全部端点要求 `?token=` 或 Bearer
 - compose 之外也可纯进程组网：蜜罐侧 `HONEYPOT_HIVE_URL=http://hive:8899` 即可，零容器依赖
 
 ---

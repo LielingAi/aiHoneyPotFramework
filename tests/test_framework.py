@@ -1711,6 +1711,160 @@ class TestProductInfra:
         os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
 
 
+class TestProductP2:
+    """产品化 P2: 登录门面 / 角色授权 / fleet 自动注册 / 态势聚合 / 配置页 / 保留策略"""
+
+    def _mk(self, tmp_path):
+        import threading
+        from http.server import ThreadingHTTPServer
+        import experiments.dashboard as d
+        from core.testdb import TestDB
+        d.DB = TestDB(str(tmp_path / "p2.sqlite"))
+        # 清掉旧会话
+        d.SESSIONS.clear()
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), d.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return d, srv, srv.server_address[1]
+
+    def test_login_gate_roles_and_fleet(self, tmp_path):
+        import urllib.request
+        d, srv, port = self._mk(tmp_path)
+        d.DB.create_user("admin", "pw-admin", role="admin")
+        d.DB.create_user("wren", "pw-wren", role="viewer")
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+
+        def post(path, payload, cookie=None, csrf=True):
+            h = {"Content-Type": "application/json"}
+            if cookie:
+                h["Cookie"] = cookie
+            if csrf:
+                h["X-Requested-With"] = "x"
+            req = urllib.request.Request(url + path, data=json.dumps(payload).encode(),
+                                         headers=h)
+            try:
+                with op.open(req, timeout=5) as r:
+                    return r.status, dict(r.headers), json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, dict(e.headers), {}
+
+        def get(path, cookie=None):
+            h = {"Cookie": cookie} if cookie else {}
+            req = urllib.request.Request(url + path, headers=h)
+            try:
+                with op.open(req, timeout=5) as r:
+                    return r.status, r.read().decode("utf-8", errors="ignore")
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode("utf-8", errors="ignore")
+
+        try:
+            # 未登录 → 首页是登录页; API 401
+            st, body = get("/")
+            assert st == 200 and "登录" in body and "api/login" in body
+            assert get("/api/sensors")[0] == 401
+            # 错误密码 → 401
+            assert post("/api/login", {"username": "admin", "password": "x"})[0] == 401
+            # 正确登录 → Set-Cookie; 带 cookie 通
+            st, hdr, _ = post("/api/login", {"username": "wren", "password": "pw-wren"})
+            assert st == 200
+            cookie = hdr.get("Set-Cookie", "").split(";")[0]
+            assert cookie.startswith(d.COOKIE + "=")
+            assert get("/api/sensors", cookie)[0] == 200
+            # viewer 不能改配置 (403); admin 能 (200)
+            assert post("/api/config", {"alert_threshold": "5"}, cookie)[0] == 403
+            st, hdr, _ = post("/api/login", {"username": "admin", "password": "pw-admin"})
+            acookie = hdr.get("Set-Cookie", "").split(";")[0]
+            st, _, j = post("/api/config",
+                            {"alert_threshold": "5", "alert_fmt": "dingtalk",
+                             "alert_webhook": "http://127.0.0.1:9/h",
+                             "retention_days": "7"}, acookie)
+            assert st == 200 and j["saved"]
+            # 配置生效: alerter.CONFIG 已更新 (env 未设时读 DB)
+            from services import alerter
+            assert alerter.CONFIG.get("alert_threshold") == "5"
+            assert d.DB.get_setting("retention_days") == "7"
+            # CSRF: cookie 会话缺自定义头 → 403
+            st, _, _ = post("/api/config", {"alert_threshold": "1"},
+                            acookie, csrf=False)
+            assert st == 403
+            # fleet: ingest 自动注册 + 统计
+            req_rows = [{"run_id": "sensor_edge-9", "path": "/.env", "canary": 1,
+                         "session_id": "s", "ts": time.time()} for _ in range(3)]
+            req = urllib.request.Request(
+                url + "/ingest", data=json.dumps({"requests": req_rows, "intel": []}).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer"})
+            # 无机器 token 但有用户体系 → 401 (ingest 也要求 token)
+            try:
+                op.open(req, timeout=5)
+                assert False, "ingest 应 401"
+            except urllib.error.HTTPError as e:
+                assert e.code == 401
+        finally:
+            srv.shutdown()
+
+    def test_ingest_token_and_fleet_stats_and_situation(self, tmp_path):
+        import urllib.request
+        d, srv, port = self._mk(tmp_path)
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "m-tok"
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        try:
+            req = urllib.request.Request(
+                url + "/ingest",
+                data=json.dumps({"requests": [
+                    {"run_id": "sensor_edge-9", "path": "/.env", "canary": 1,
+                     "client_ip": "6.6.6.6", "families": "info_disclosure",
+                     "threat": 9.0, "ts": time.time()},
+                    {"run_id": "sensor_edge-9", "path": "/api/auth",
+                     "client_ip": "6.6.6.6", "families": "auth_probe",
+                     "threat": 2.0, "ts": time.time() - 3600},
+                ], "intel": []}).encode(),
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer m-tok"})
+            with op.open(req, timeout=5) as r:
+                assert json.loads(r.read())["ingested"] == 2
+            # fleet 自动注册 + 统计
+            st, body = None, None
+            with op.open(urllib.request.Request(
+                    url + "/api/sensors?token=m-tok", headers={}), timeout=5) as r:
+                rows = json.loads(r.read())
+            assert len(rows) == 1 and rows[0]["sensor_id"] == "edge-9"
+            assert rows[0]["online"] and rows[0]["total_events"] == 2
+            assert rows[0]["canary_hits"] == 1
+            # 态势聚合
+            with op.open(urllib.request.Request(url + "/api/situation?token=m-tok"),
+                         timeout=5) as r:
+                sit = json.loads(r.read())
+            assert sit["total_24h"] == 2 and sit["canary_24h"] == 1
+            assert sit["sensors_online"] == 1 and sit["sensors_total"] == 1
+            assert sum(sit["hist24"]) == 2
+            assert sit["top_ips"] and sit["top_ips"][0]["client_ip"] == "6.6.6.6"
+            assert any(f[0] == "info_disclosure" for f in sit["families"])
+            # admin 备注 (机器 token = admin)
+            req = urllib.request.Request(
+                url + "/api/sensors/note",
+                data=json.dumps({"sensor_id": "edge-9", "note": "东京 VPS"}).encode(),
+                headers={"Content-Type": "application/json",
+                         "X-Requested-With": "x", "Authorization": "Bearer m-tok"})
+            with op.open(req, timeout=5) as r:
+                assert json.loads(r.read())["ok"]
+            assert d.DB.list_sensors()[0]["note"] == "东京 VPS"
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
+    def test_retention_purge(self, tmp_path):
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "purge.sqlite"))
+        db.ingest_requests([{"path": "/old", "ts": time.time() - 40 * 86400},
+                            {"path": "/new", "ts": time.time()}])
+        db.record_intel("r", "s", "f", "consistent", "h", "sample", False)
+        out = db.purge_older_than(30)
+        assert out["requests"] == 1 and out["intel"] == 0
+        rows = db.query("SELECT path FROM requests")
+        assert [r["path"] for r in rows] == ["/new"]
+
+
 class TestBeliefChoreography:
     """能力③信念编舞: 可自验证假 CVE (版本 banner + traversal 症状) 与采纳率检测"""
 
