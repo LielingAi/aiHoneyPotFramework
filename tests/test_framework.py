@@ -2130,6 +2130,64 @@ class TestProductP2:
             os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
             srv.shutdown()
 
+    def test_arsenal_crud(self, tmp_path):
+        """武器库 CRUD: save(带校验)→ 读取 → toggle → UPSERT 更新 → delete → 确认消失"""
+        import urllib.request
+        d, srv, port = self._mk(tmp_path)
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "m-tok"
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+
+        def post(payload):
+            req = urllib.request.Request(
+                url + "/api/arsenal", data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         "X-Requested-With": "x", "Authorization": "Bearer m-tok"})
+            try:
+                with op.open(req, timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read() or b"{}")
+
+        def get_ids():
+            with op.open(urllib.request.Request(url + "/api/arsenal?token=m-tok"),
+                         timeout=5) as r:
+                return [w["id"] for w in json.loads(r.read())]
+
+        try:
+            w = {"id": "W-TEST-CRUD-1", "name": "测试武器", "type": "prompt",
+                 "stage": "sensor", "mount": "ladder",
+                 "payload": "ladder bait payload", "note": "crud 测试", "enabled": False}
+            # save → get 验证
+            st, j = post({"action": "save", "weapon": w})
+            assert st == 200 and j["ok"]
+            assert "W-TEST-CRUD-1" in get_ids()
+            # 入库校验: 坏 id / 空 payload / 非法 mount → 400
+            for bad in ({"id": "x", "payload": "p", "type": "prompt",
+                         "stage": "sensor", "mount": "ladder"},
+                        {"id": "W-BAD-1", "payload": " ", "type": "prompt",
+                         "stage": "sensor", "mount": "ladder"},
+                        {"id": "W-BAD-2", "payload": "p", "type": "prompt",
+                         "stage": "sensor", "mount": "nowhere"}):
+                st, j = post({"action": "save", "weapon": bad})
+                assert st == 400 and "error" in j, f"应 400: {bad['id']}"
+            # toggle 激活 → UPSERT 更新 (note 变化)
+            st, j = post({"action": "toggle", "id": "W-TEST-CRUD-1", "enabled": True})
+            assert st == 200 and j["ok"]
+            w["enabled"] = True
+            w["note"] = "更新备注"
+            st, j = post({"action": "save", "weapon": w})
+            assert st == 200 and j["ok"]
+            # delete → 确认消失; 再删幂等 ok=false
+            st, j = post({"action": "delete", "id": "W-TEST-CRUD-1"})
+            assert st == 200 and j["ok"]
+            assert "W-TEST-CRUD-1" not in get_ids()
+            st, j = post({"action": "delete", "id": "W-TEST-CRUD-1"})
+            assert st == 200 and not j["ok"]
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
     def test_retention_purge(self, tmp_path):
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "purge.sqlite"))

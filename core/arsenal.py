@@ -97,6 +97,11 @@ class Arsenal:
         w["enabled"] = bool(enabled)
         return self.save(w)
 
+    def delete(self, weapon_id: str) -> bool:
+        with self.db._conn() as c:
+            cur = c.execute("DELETE FROM arsenal WHERE weapon_id=?", (weapon_id,))
+        return cur.rowcount > 0
+
     # ------------------------------------------------------------------
     def active_for(self, mount: str, stage: str = "sensor") -> List[Dict]:
         """某投递点上已激活的武器 — delivery 侧调用"""

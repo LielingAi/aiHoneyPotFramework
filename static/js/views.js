@@ -817,11 +817,68 @@ const CM_KIND = {
   intel_triage: ["情报处置", "info"],
 };
 
-/* 武器库: 类型图标 + stage 药丸配色 */
+/* ---------- 武器库: 独立目的地 — 定义/编辑/删除, 下发 60s 全网生效 ---------- */
 const WTYPE = { prompt: "✦", vuln: "⌗", mcp: "⛁", cli: "⌘" };
 const WSTAGE = { sensor: ["info", "开口子"], c2: ["purple", "深层次"] };
+const WTYPE_OPTS = [["prompt", "提示词 ✦"], ["vuln", "漏洞 ⌗"], ["mcp", "MCP ⛁"], ["cli", "CLI ⌘"]];
+const WSTAGE_OPTS = [["sensor", "sensor · 开口子"], ["c2", "c2 · 深层次"]];
+const WMOUNT_OPTS = [["delivery", "delivery · 交付受理"], ["ladder", "ladder · 阶梯话术"],
+                     ["c2_next_stage", "c2_next_stage · C2 二阶段"],
+                     ["mcp_desc", "mcp_desc · MCP 描述"]];
+const WID_RE = /^[A-Za-z0-9_-]{2,40}$/;
 
-function weaponCard(w, onToggle) {
+/* 前端先校验, 与服务端 _weapon_error 同规则 (type/stage/mount 由 select 保证) */
+function weaponErr(w) {
+  if (!WID_RE.test(w.id || "")) return "ID 需为 2-40 位字母/数字/_/-";
+  if (!String(w.payload || "").trim()) return "载荷 payload 不能为空";
+  return "";
+}
+
+/* 编辑态卡片: 新建 (w.id 空) 与编辑共用; onDone=保存成功后, onCancel=取消 */
+function weaponEditCard(w, { onDone, onCancel }) {
+  const isNew = !w.id;
+  const st = "background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
+    + "color:var(--text);padding:7px 12px;font-size:12.5px;width:100%";
+  const idI = h("input", { style: st + ";font-family:var(--mono)",
+    placeholder: "武器 ID (如 W-PROMPT-X-1)", value: w.id || "" });
+  if (!isNew) idI.disabled = true;   /* id 即主键, 编辑时不可改 (改名=新建+删除) */
+  const nameI = h("input", { style: st, placeholder: "名称 (如 授权核实·标准)", value: w.name || "" });
+  const noteI = h("input", { style: st, placeholder: "备注 (可选)", value: w.note || "" });
+  const payI = h("textarea", { rows: "5", style: st + ";resize:vertical;font-family:var(--mono);font-size:11.5px",
+    placeholder: "武器载荷本体 — 提示词文本 / 载荷定义" }, w.payload || "");
+  const mkSel = (opts, val) => h("select", { class: "ctl", style: "flex:1;min-width:0" },
+    ...opts.map(([v, t]) => h("option", { value: v, selected: v === val }, t)));
+  const typeS = mkSel(WTYPE_OPTS, w.type || "prompt");
+  const stageS = mkSel(WSTAGE_OPTS, w.stage || "sensor");
+  const mountS = mkSel(WMOUNT_OPTS, w.mount || "delivery");
+  const err = h("div", { style: "color:var(--bad);font-size:11.5px;min-height:14px" });
+  const save = h("button", { class: "btn primary", onclick: async () => {
+    const weapon = { id: idI.value.trim(), name: nameI.value.trim(), type: typeS.value,
+      stage: stageS.value, mount: mountS.value, payload: payI.value,
+      note: noteI.value.trim(), enabled: !!w.enabled };
+    const e0 = weaponErr(weapon);
+    if (e0) { err.textContent = e0; return; }
+    try {
+      await api.post("arsenal", { action: "save", weapon });
+      toast(`${isNew ? "已创建" : "已保存"} — 60s 内下发全网传感器`);
+      onDone();
+    } catch (e) { err.textContent = e.message; }
+  } }, isNew ? "创建" : "保存");
+  return h("div", { class: "card pad", style: "border-color:var(--accent)" },
+    h("div", { class: "t muted" }, isNew ? "新建武器 — 保存后进入武器库" : `编辑武器 · ${w.id}`),
+    h("div", { style: "display:grid;gap:8px;margin-top:6px" },
+      h("div", { style: "display:flex;gap:8px" }, idI, nameI),
+      h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
+        h("span", { class: "muted", style: "font-size:11.5px" }, "类型"), typeS,
+        h("span", { class: "muted", style: "font-size:11.5px" }, "阶段"), stageS,
+        h("span", { class: "muted", style: "font-size:11.5px" }, "挂载"), mountS),
+      payI, noteI, err,
+      h("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
+        h("button", { class: "btn", onclick: onCancel }, "取消"), save)));
+}
+
+/* 展示卡: 图标/stage药丸/mount/开关 + 载荷预览(点击展开) + 编辑/删除 */
+function weaponCard(w, { onChanged, onEdit }) {
   const icon = WTYPE[w.type] || "·";
   const [stageKind, stageLabel] = WSTAGE[w.stage] || ["dim", w.stage || "?"];
   const full = String(w.payload || "");
@@ -837,7 +894,7 @@ function weaponCard(w, onToggle) {
     try {
       await api.post("arsenal", { action: "toggle", id: w.id, enabled: tog.checked });
       toast(`${w.name || w.id} ${tog.checked ? "已激活 — 60s 内下发全网传感器" : "已停用"}`);
-      onToggle();
+      onChanged();
     } catch (e) { toast(e.message, "err"); }
   });
   const card = h("div", { class: "card pad",
@@ -848,11 +905,25 @@ function weaponCard(w, onToggle) {
       h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
       h("label", { class: "switch", style: "margin-left:auto",
         onclick: (e) => e.stopPropagation() }, tog, h("span", { class: "slider" }))),
-    h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id),
+    h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id,
+      w.name ? h("span", { class: "mono faint",
+        style: "font-weight:400;font-size:10.5px;margin-left:6px" }, w.id) : null),
     w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-bottom:8px" }, w.note) : null,
     h("div", { class: "mono", style: "font-size:11px;color:var(--dim);word-break:break-all" },
       full.slice(0, 90) + (expandable ? "…" : ""), hint),
-    pre);
+    pre,
+    h("div", { style: "display:flex;gap:6px;justify-content:flex-end;margin-top:8px" },
+      h("button", { class: "btn", style: "padding:3px 10px;font-size:11.5px",
+        onclick: (e) => { e.stopPropagation(); onEdit(); } }, "编辑"),
+      h("button", { class: "btn", style: "padding:3px 10px;font-size:11.5px",
+        onclick: async (e) => {
+          e.stopPropagation();
+          if (!window.confirm(`确认删除武器 ${w.name || w.id} (${w.id})?`)) return;
+          try {
+            await api.post("arsenal", { action: "delete", id: w.id });
+            toast("已删除"); onChanged();
+          } catch (e2) { toast(e2.message, "err"); }
+        } }, "删除")));
   card.addEventListener("click", () => {
     if (!expandable) return;
     pre.hidden = !pre.hidden;
@@ -861,13 +932,49 @@ function weaponCard(w, onToggle) {
   return card;
 }
 
+async function viewArsenal(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("武器库", "定义 → 下发 60s 全网生效 · 传感器=开口子 · C2=深层次"));
+  const count = h("span", { class: "count" });
+  const newBox = h("div", {});
+  const grid = h("div", { class: "grid c3", style: "margin-top:12px" });
+  let editing = null;   /* 正在编辑的武器 id (null=无) */
+  root.append(
+    h("div", { class: "toolbar" },
+      h("button", { class: "btn primary", onclick: () => {
+        newBox.replaceChildren(weaponEditCard(
+          { type: "prompt", stage: "sensor", mount: "delivery", enabled: false },
+          { onDone: () => { newBox.replaceChildren(); load(); },
+            onCancel: () => newBox.replaceChildren() }));
+      } }, "＋ 新建武器"), count),
+    newBox, grid);
+
+  async function load() {
+    let weapons = [];
+    try { weapons = await api.get("arsenal"); }
+    catch (e) {
+      grid.replaceChildren(h("div", { class: "empty" }, "加载失败: " + e.message));
+      return;
+    }
+    count.textContent = `${weapons.filter((w) => w.enabled).length} 激活 / ${weapons.length} 把`;
+    grid.replaceChildren(...weapons.map((w) => w.id === editing
+      ? weaponEditCard(w, { onDone: () => { editing = null; load(); },
+                            onCancel: () => { editing = null; load(); } })
+      : weaponCard(w, { onChanged: load, onEdit: () => { editing = w.id; load(); } })));
+  }
+  await load();
+  return { root, reload: load };
+}
+
 async function viewOps(ctx) {
   const root = h("div", {});
   root.append(pageHead("反制作战室", "策略一键切换 · 每次出手都有实录 · 情报可处置 · 噪音可熔断"));
   const goalBox = h("div", { class: "grid c3", style: "margin-bottom:14px" });
   root.append(goalBox);
-  const weaponBox = h("div", { style: "margin-bottom:14px" });
-  root.append(weaponBox);
+  /* 武器库已独立为目的地 (军械组), 这里只留入口 */
+  root.append(h("div", { class: "toolbar", style: "margin:-4px 0 12px" },
+    h("button", { class: "ctl", onclick: () => { location.hash = "#/arsenal"; } },
+      "✦ 武器库 → 定义 / 编辑反制武器")));
 
   const policyBox = h("div", { class: "grid kpi" });
   const funnelBox = h("div", { class: "grid c3", style: "margin:14px 0" });
@@ -912,18 +1019,6 @@ async function viewOps(ctx) {
       g1, g2,
       statCard({ title: "目的③ 控制权", value: "研究中", kind: "warn",
         desc: "指挥 Agent 执行我们的动作 — 仅对弱对齐模型可能, 待弱模型矩阵实测" }));
-
-    /* 武器库 (单独取数, 故障不拖垮整页) */
-    let weapons = [];
-    try { weapons = await api.get("arsenal"); } catch (_) {}
-    const wActive = weapons.filter((w) => w.enabled).length;
-    weaponBox.replaceChildren(h("div", { class: "card" },
-      h("div", { class: "card-head" },
-        `武器库 (${wActive} 激活/${weapons.length} 把) — 传感器=开口子 · C2=深层次`),
-      weapons.length
-        ? h("div", { class: "card-body" },
-            h("div", { class: "grid c3" }, ...weapons.map((w) => weaponCard(w, load))))
-        : h("div", { class: "empty" }, "武器库为空")));
 
     /* 策略卡 + 直切 */
     const presetName = { conservative: "保守观察", standard: "标准", aggressive: "激进消耗" };
@@ -1165,6 +1260,6 @@ async function viewSessions(ctx) {
 HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
              viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
              viewEvents, viewIntel, viewRequests, viewRuns, viewEntity, viewOps,
-             viewAttackers, viewSessions,
+             viewArsenal, viewAttackers, viewSessions,
              viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
 })();

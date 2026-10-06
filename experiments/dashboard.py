@@ -19,6 +19,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -198,6 +199,28 @@ def _paged(qs: dict, base_sql: str, count_sql: str, params: tuple,
     total = DB.query(count_sql, params)[0]["n"]
     rows = DB.query(f"{base_sql} LIMIT ? OFFSET ?", (*params, size, (page - 1) * size))
     return {"rows": rows, "total": total, "page": page, "page_size": size}
+
+
+# ---- 武器库入库校验 (与前端 weaponErr 同规则) ----
+_WTYPES = {"prompt", "vuln", "mcp", "cli"}
+_WSTAGES = {"sensor", "c2"}
+_WMOUNTS = {"delivery", "ladder", "c2_next_stage", "mcp_desc"}
+_WID_RE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
+
+
+def _weapon_error(w: dict) -> str:
+    """武器入库前校验, 返回错误文案 (空串 = 通过)"""
+    if not _WID_RE.match(str(w.get("id", "") or "")):
+        return "武器 id 需为 2-40 位字母/数字/_/-"
+    if not str(w.get("payload", "") or "").strip():
+        return "payload 不能为空"
+    if w.get("type") not in _WTYPES:
+        return "type 需为 prompt/vuln/mcp/cli"
+    if w.get("stage") not in _WSTAGES:
+        return "stage 需为 sensor/c2"
+    if w.get("mount") not in _WMOUNTS:
+        return "mount 需为 delivery/ladder/c2_next_stage/mcp_desc"
+    return ""
 
 
 def _attackers(days: str) -> list:
@@ -584,8 +607,16 @@ class Handler(BaseHTTPRequestHandler):
             act = body.get("action", "")
             if act == "toggle":
                 ok = ars.set_enabled(body.get("id", ""), bool(body.get("enabled")))
+            elif act == "delete":
+                ok = ars.delete(body.get("id", ""))
             elif act == "save":
-                ok = ars.save(body.get("weapon", {}))
+                weapon = body.get("weapon", {}) or {}
+                werr = _weapon_error(weapon)
+                if werr:
+                    self._send(400, json.dumps({"error": werr}, ensure_ascii=False).encode(),
+                               "application/json")
+                    return
+                ok = ars.save(weapon)
             else:
                 ok = False
             self._send(200, json.dumps({"ok": ok}).encode(), "application/json")

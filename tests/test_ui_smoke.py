@@ -47,7 +47,7 @@ def hive(tmp_path):
 def test_all_routes_render(hive):
     """全部目的地与 tab 路由: 不得出现'加载失败', 不得有 pageerror"""
     routes = ["situation", "events/tail", "events/requests", "events/actions",
-              "ops", "investigate", "sessions",
+              "ops", "arsenal", "investigate", "sessions",
               "fleet", "intel/graded", "intel/actors",
               "experiments/trials", "experiments/summary", "experiments/compare",
               "experiments/bandit", "experiments/runs", "config",
