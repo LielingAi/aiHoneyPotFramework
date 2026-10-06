@@ -1,6 +1,6 @@
 # 开发路线图 —— 从研究系统到反制系统
 
-> 状态基线: 2026-10-05, **93/93 测试**, P0-P3 全部落地, 8/8 审计签名存活对抗, main 已推送。
+> 状态基线: 2026-10-06, **93/93 测试**, P0-P3 全部落地, 9/9 审计签名存活对抗 (nmap 指纹缺口已补, 与真实 PG 14 标签逐字一致), main 已推送。
 > 排期按单人全速估算; 每阶段出口标准 = 测试全绿 + 真实框架回归 + README 同步。
 
 ## Phase 0 — 输出端闭环: 情报变动作 (Week 1)
@@ -71,10 +71,10 @@
 | LangChain 官方 MCP 适配器 × 诱饵工具 | 调用 5 次, 信道跨实现成立 |
 | 假 PG × psql 级握手 (认证/版本/users/错拒) | 4/4 PASS |
 | **假 PG × psycopg3 (默认扩展协议)** | **参数化查询/BEGIN/COMMIT/information_schema/INSERT 全通; WHERE 行级过滤成立** (Execute 不重发 RowDescription 是关键修复) |
-| **审计签名库 × 重放回归** | **8/8 PASS** (布尔稳定/CHR 求值/语法兜底/UNION 列数/堆叠/引号/wire 序列/WHERE 过滤) |
+| **审计签名库 × 重放回归** | **9/9 PASS** (布尔稳定/CHR 求值/语法兜底/UNION 列数/堆叠/引号/wire 序列/WHERE 过滤/nmap指纹·H2误判) |
 | **sqlmap × 动态 SQLi 引擎** | **全技术判定可注入 + 后端指纹 PostgreSQL** (布尔/时间/UNION 3列; 语法错误兜底是关键修复) |
 | nuclei 模板库 × 蜜罐端点 | 基线建立 (info 级模板命中, 记录趋势) |
-| nmap -sV × 假 PG | **FAIL (预存缺口, 3 轮连续)**: 18121/18122 识别 unknown, 曾误判 H2 database — 静默协议无 banner, 需 ground truth 校准或前置代理 |
+| nmap -sV × 假 PG | **PASS: `PostgreSQL DB 9.6.0 or later` — 与真实 PG 14 标签逐字一致**。关键修复: 启动校验状态机三条错误路径 (布局 C08P01 L2277 / major>3 扩展 C0A000 L2165 / major<3 老式文本, 与真实 PG 14/16 字节级一致) + H2 误判根因消除 (ground truth: experiments/pg_truth_probe.py) |
 
 ## 风险
 

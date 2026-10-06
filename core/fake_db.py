@@ -72,6 +72,19 @@ def _parameter_status(key: str, value: str) -> bytes:
 _READY = _msg(b"Z", b"I")
 _AUTH_OK = _msg(b"R", struct.pack(">I", 0))
 _AUTH_CLEARTEXT = _msg(b"R", struct.pack(">I", 3))
+# 布局错误 — 与真实 PG 14/16 字节级一致 (experiments/pg_truth_probe.py 实测,
+# 两版本同为 L2277); nmap softmatch postgresql 的命中面, 也是拒绝 H2 误判的关键
+_LAYOUT_ERROR = (b"E\x00\x00\x00\x85SFATAL\x00VFATAL\x00C08P01\x00"
+                 b"Minvalid startup packet layout: expected terminator as last byte\x00"
+                 b"Fpostmaster.c\x00L2277\x00RProcessStartupPacket\x00\x00")
+
+
+def _unsupported_proto(major: int, minor: int) -> bytes:
+    """扩展格式 C0A000 — 与真实 PG 14 对 SMBProgNeg 探针的应答逐字节一致 (L2165)"""
+    msg = (f"SFATAL\x00VFATAL\x00C0A000\x00Munsupported frontend protocol {major}.{minor}: "
+           f"server supports 3.0 to 3.0\x00Fpostmaster.c\x00L2165\x00"
+           f"RProcessStartupPacket\x00\x00")
+    return b"E" + struct.pack(">I", len(msg.encode()) + 4) + msg.encode()
 
 
 def _world_rows(world, n: int = 8):
@@ -140,25 +153,55 @@ class FakePostgresServer:
                 sent_seq.append(chr(data[0]))
             conn.sendall(data)
         try:
-            # StartupMessage (SSLRequest 先应答 'N' — 真实 PG 行为, 也是 nmap 识别 postgres 的依据)
-            for _ in range(3):
+            # StartupMessage 完整校验状态机 — ground truth: 真实 PG 14/16 字节级对照
+            # (experiments/pg_truth_probe.py)。nmap 指纹与 H2 误判修复都依赖这三条路径:
+            #   长度非法      → 静默断开 (真 PG 如此)
+            #   协议非 3.0    → 老式文本错误 "EFATAL:  unsupported frontend protocol…"
+            #   布局非法      → 扩展错误 C08P01 invalid startup packet layout… (134B, 版本稳定)
+            params = {}
+            for _ in range(4):
                 _, body = self._recv_msg(conn)
                 if body is None or len(body) < 4:
                     return
+                if len(body) + 4 > 10000:        # 声明长度超过 PG 上限 — 静默断开
+                    return
                 code = struct.unpack(">I", body[:4])[0]
-                if code == 80877103:          # SSLRequest
+                if code == 80877103:             # SSLRequest → 拒绝, 继续等明文 startup
                     send(b"N")
                     continue
-                if code != 196608:            # 非法协议 — 断开而非阻塞
+                major, minor = code >> 16, code & 0xFFFF
+                if major < 3:
+                    # 上古协议 (1.x/2.x) — 老式文本错误 (PG 14 对 2.0 实测如此)
+                    send(b"EFATAL:  unsupported frontend protocol %d.%d: "
+                         b"server supports 3.0 to 3.0\n\x00" % (major, minor))
+                    return
+                if major > 3:
+                    # 未来协议 — 扩展错误 C0A000 (nmap hard match "9.6.0 or later" 的命中面)
+                    send(_unsupported_proto(major, minor))
+                    return
+                # major == 3 (minor 任意): 布局校验 — 真 PG 对 3.x 先验布局再谈版本
+                # 布局校验: key\0value\0…\0 必须以空键收尾 (即末字节为收尾 \0 且前面成对)
+                layout = body[4:]
+                off = 0
+                ok = layout.endswith(b"\x00")
+                while ok and off < len(layout) - 1:
+                    k_end = layout.find(b"\x00", off)
+                    if k_end <= off:             # 空键却还有后续内容
+                        ok = False
+                        break
+                    v_end = layout.find(b"\x00", k_end + 1)
+                    if v_end < 0:
+                        ok = False
+                        break
+                    params[layout[off:k_end].decode(errors="ignore")] = \
+                        layout[k_end + 1:v_end].decode(errors="ignore")
+                    off = v_end + 1
+                if not (ok and off == len(layout) - 1):
+                    send(_LAYOUT_ERROR)
                     return
                 break
             else:
                 return
-            params = {}
-            parts = body[4:].split(b"\x00")
-            for i in range(0, len(parts) - 1, 2):
-                if parts[i]:
-                    params[parts[i].decode(errors="ignore")] = parts[i + 1].decode(errors="ignore")
             user = params.get("user", "")
             send(_AUTH_CLEARTEXT)
             # PasswordMessage
@@ -254,6 +297,10 @@ class FakePostgresServer:
             import traceback
             traceback.print_exc()
         finally:
+            try:
+                conn.shutdown(socket.SHUT_WR)   # 先发 FIN 再关, 避免 RST 干扰客户端
+            except OSError:
+                pass
             try:
                 conn.close()
             except OSError:

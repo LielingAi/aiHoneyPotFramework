@@ -50,6 +50,26 @@
 
 ---
 
+## 📊 研究数据面板
+
+零依赖中文面板（stdlib 单文件）——每一次在环试验实时落库可查：`py -3.13 experiments/dashboard.py --db experiments/results/testdb.sqlite --port 8899`
+
+| 指标总览 · 操作者归因 · 汇总指标 |
+|---|
+| ![指标总览与操作者归因](docs/images/dashboard-metrics.png) |
+
+| 试验明细（三维筛选 + 全文搜索） | 情报分级（五档证据） |
+|---|---|
+| ![试验明细](docs/images/dashboard-trials.png) | ![情报分级](docs/images/dashboard-intel.png) |
+
+- **指标总览**: 发现攻击耗时 / 真外泄率 / 注入服从率 / 预算放大倍数 / 误报率 / 情报产出 —— 与 `analyze.py kpi` 同口径
+- **操作者归因**: 跨会话聚类——攻击方泄漏的主机名/用户名/内网地址自动归并为 threat-actor
+- **演化实验**: `--optimize` UCB1 自动 A/B 各话术组合臂进展
+- **试验明细**: run × 场景 × 人设三维筛选 + 任意字段搜索
+- **一键导出**: 当前运行 → STIX 2.1 bundle（可导 OpenCTI）
+
+---
+
 ## ⚔️ 真实渗透框架 × 蜜罐（Docker 实测）
 
 <table>
@@ -201,7 +221,7 @@ services/
 experiments/
 ├── real_runner.py        # 在环测量运行器 (矩阵 × DB, --optimize UCB1 在线 A/B)
 ├── real_tool_regression.py # 真刀回归 (sqlmap/nuclei/nmap/psycopg3/redis 对当前构建)
-├── signature_replay.py   # 审计签名重放 (8 签名, 任何 tell 存活即 FAIL)
+├── signature_replay.py   # 审计签名重放 (9 签名, 任何 tell 存活即 FAIL)
 ├── bandit.py             # UCB1 臂选择器 (framing×visibility 6 臂, JSON 持久化)
 ├── mcp_client_agent.py   # MCP 客户端 Agent (DeepSeek × N 服务器)
 ├── mcp_decoy_shim.py     # 蜜罐诱饵 → 原生 MCP stdio
@@ -213,7 +233,7 @@ experiments/
     analyze.py              # 测试记录分析 CLI (summary/compare/kpi/attribution/export-stix)
     federation_*.py         # 联邦 gossip/多进程演示
 research/
-├── audit-signatures.json        # 审计签名库 (8 个 tell 的探针+期望, CI 式重放)
+├── audit-signatures.json        # 审计签名库 (9 个 tell 的探针+期望, CI 式重放)
 ├── honeypot-judge-bypass.md     # 判定器攻击面 × 防御清单
 ├── agent-trust-literature.md    # Agent 信任层级文献综合
 └── federation-spec.md           # 联邦信誉网规格

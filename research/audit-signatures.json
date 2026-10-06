@@ -77,6 +77,15 @@
       "replay": "pg_where",
       "params": {"hit": "admin", "miss": "no_such_user_9f3a"},
       "expect": "hit → 1 行且 username=admin; miss → 0 行; 无 WHERE → 8 行"
+    },
+    {
+      "id": "nmap-ident-and-h2-mislabel",
+      "component": "core/fake_db.py",
+      "severity": "critical",
+      "tell": "双死因: (1) 静默协议无错误路径 → nmap 报 unknown; (2) 更糟 — 任何体内含 196608 的探针被当合法 startup, 我们的明文认证请求字节与 nmap 的 H2 指纹完全同形, 被误标 H2 database = 主动穿帮。修复 = 真 PG 启动校验状态机三条错误路径 (ground truth: 真实 PG 14/16 字节级一致, 见 experiments/pg_truth_probe.py)",
+      "replay": "pg_startup_errors",
+      "params": {},
+      "expect": "major>3 探针(如 nmap SMBProgNeg) → 扩展 C0A000 错误逐字节同真 PG14 (L2165); major<3 → 老式文本错误; major=3 布局非法 → C08P01 布局错误 (L2277); 无长度前缀乱码 → 静默断开; 全程不得出现明文认证请求 (H2 误判根因)"
     }
   ]
 }

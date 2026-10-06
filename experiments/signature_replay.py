@@ -217,6 +217,66 @@ def r_pg_where(sig):
         srv.stop() if hasattr(srv, "stop") else None
 
 
+def _raw_probe(port, payload, read_to=3.0):
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    s.settimeout(read_to)
+    s.sendall(payload)
+    out = b""
+    try:
+        while True:
+            d = s.recv(4096)
+            if not d:
+                break
+            out += d
+    except (socket.timeout, ConnectionResetError):
+        pass
+    s.close()
+    return out
+
+
+def r_pg_startup_errors(sig):
+    """nmap 指纹/H2 误判签名 — 四类畸形 startup 应答必须与真 PG14 字节级一致"""
+    import struct as st
+    srv, _ = _pg_start()
+    port = srv._sock.getsockname()[1]
+    try:
+        smbprogneg = (bytes([0, 0, 0, 0xA4]) + b"\xffSMB\x72" + b"\x00" * 36
+                      + b"\x40\x06\x00\x00\x01\x00\x00\x81\x00"
+                      + b"\x02PC NETWORK PROGRAM 1.0\x00\x02MICROSOFT NETWORKS 1.03\x00"
+                      + b"\x02MICROSOFT NETWORKS 3.0\x00\x02LANMAN1.0\x00"
+                      + b"\x02LM1.2X002\x00\x02Samba\x00\x02NT LANMAN 1.0\x00"
+                      + b"\x02NT LM 0.12\x00")
+        real_smb = (b"E\x00\x00\x00\x8bSFATAL\x00VFATAL\x00C0A000\x00Munsupported frontend "
+                    b"protocol 65363.19778: server supports 3.0 to 3.0\x00Fpostmaster.c\x00"
+                    b"L2165\x00RProcessStartupPacket\x00\x00")
+        proto20 = st.pack(">I", 20) + st.pack(">II", 131072, 0) + b"\x00" * 8
+        real_20 = b"EFATAL:  unsupported frontend protocol 2.0: server supports 3.0 to 3.0\n\x00"
+        bad_layout = st.pack(">I", 16) + st.pack(">I", 196608) + b"GARBAGE!!"
+        real_layout = (b"E\x00\x00\x00\x85SFATAL\x00VFATAL\x00C08P01\x00Minvalid startup "
+                       b"packet layout: expected terminator as last byte\x00Fpostmaster.c\x00"
+                       b"L2277\x00RProcessStartupPacket\x00\x00")
+        bare_garbage = b"\xffSMB\x72\x00\x00\x00\x00\x08\x01\x40"   # 无长度前缀
+        h2_tell = b"\x52\x00\x00\x00\x08\x00\x00\x00\x03"           # 明文认证请求 (H2 同形)
+        checks = []
+        r = _raw_probe(port, smbprogneg)
+        checks.append(("SMBProgNeg→C0A000", r == real_smb))
+        r = _raw_probe(port, proto20)
+        checks.append(("协议2.0→老式文本", r == real_20))
+        r = _raw_probe(port, bad_layout)
+        checks.append(("布局非法→C08P01", r == real_layout))
+        r = _raw_probe(port, bare_garbage)
+        checks.append(("裸乱码→静默", r == b""))
+        auth_leak = False
+        for p in (smbprogneg, proto20, bad_layout, bare_garbage):
+            if h2_tell in _raw_probe(port, p):
+                auth_leak = True
+        checks.append(("无认证请求泄露(H2根因)", not auth_leak))
+        ok = all(c for _, c in checks)
+        return ok, " | ".join(f"{n}:{'OK' if c else 'XX'}" for n, c in checks)
+    finally:
+        srv._sock.close()
+
+
 EXECUTORS = {
     "bool_stability": r_bool_stability,
     "chr_eval": r_chr_eval,
@@ -226,6 +286,7 @@ EXECUTORS = {
     "quote": r_quote,
     "pg_wire": r_pg_wire,
     "pg_where": r_pg_where,
+    "pg_startup_errors": r_pg_startup_errors,
 }
 
 _WORLD = FakeWorld("sig")
