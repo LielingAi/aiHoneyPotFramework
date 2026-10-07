@@ -1772,9 +1772,9 @@ async function viewOps(ctx) {
               try { await api.post("blocklist", { action: "remove", ip }); toast("已解除"); load(); }
               catch (e) { toast(e.message, "err"); } } }, "×"))))));
 
-    /* C2 信标流 */
+    /* 世界信标流 — 蜜罐世界的仿真端点捕获 (信标服务), 非独立 C2 */
     c2Box.replaceChildren(h("div", { class: "card" },
-      h("div", { class: "card-head" }, `C2 信标捕获 (${beacons.length})`),
+      h("div", { class: "card-head" }, `信标捕获 (${beacons.length})`),
       beacons.length ? h("div", { class: "card-body" }, table([
         { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
         { h: "传感器", render: (r) => pill(r.sensor_id || "?", "dim") },

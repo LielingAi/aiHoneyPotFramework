@@ -111,7 +111,7 @@ SEED_WEAPONS = [
     },
     {
         "id": "W-C2-STAGE2-1",
-        "name": "C2 二级·环境回传",
+        "name": "信标二级·环境回传",
         "class": "cli",
         "type": "cli", "stage": "c2", "mount": "c2_next_stage",
         "enabled": True,
