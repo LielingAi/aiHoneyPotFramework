@@ -783,6 +783,19 @@ async def main():
         honeypot_main.auth_bait.LADDER_ENABLED = False
 
     honeypot_main.countermeasure.level = 3
+    if os.environ.get("HONEYPOT_HIVE_URL"):
+        try:
+            import urllib.request as _u
+            from core.arsenal import sensor_cache as _sc
+            req = _u.Request(os.environ["HONEYPOT_HIVE_URL"].rstrip("/") + "/api/sensor_config",
+                             headers={"Authorization": "Bearer " + os.environ.get("HONEYPOT_HIVE_TOKEN", "")})
+            with _u.build_opener(_u.ProxyHandler({})).open(req, timeout=10) as r:
+                _cfg = json.loads(r.read()).get("config", {})
+            if _cfg.get("arsenal_active"):
+                _sc().load_push(_cfg["arsenal_active"])
+                print(f"[Arsenal] 武器已上膛: {[w['id'] for w in _sc().weapons if w.get('enabled')]}")
+        except Exception as e:
+            print(f"[Arsenal] 拉取失败(回落默认): {e}")
     server_task = asyncio.create_task(honeypot_main.run_http_server(args.port))
 
     async def _can_bind(host: str, port: int = 8081) -> bool:
