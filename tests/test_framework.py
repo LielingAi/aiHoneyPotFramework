@@ -2456,40 +2456,58 @@ class TestProductP2:
         assert '"class": "prompt"' in db.query(
             "SELECT json FROM arsenal WHERE weapon_id='W-LEGACY-X'")[0]["json"]
 
-    def test_arsenal_v2_legacy_row_mapping(self, tmp_path):
-        """v2 旧行读时自动映射 v3 派生字段: trigger→deploy/trigger_conditions,
-        affected_version→affected_versions, component→program (派生不落库)"""
+    def test_arsenal_v2_to_v3_migration(self, tmp_path):
+        """migrate_v2_weapons: v2 行 (vuln.trigger/无 program) 转 v3 落库;
+        幂等 (转一次/再转无变化); 已 v3 行不动; 用户自建 v2 武器同样生效;
+        exp 缺 objective 补 "数据", stages[].condition 保持"""
         import time
-        from core.arsenal import Arsenal
+        from core.arsenal import Arsenal, migrate_v2_weapons
         from core.testdb import TestDB
-        db = TestDB(str(tmp_path / "ars_legacy.sqlite"))
-        ars = Arsenal(db)
-        legacy = {"id": "VULN-LEGACY-1", "name": "旧档案", "class": "vuln",
-                  "type": "vuln", "stage": "sensor", "mount": "delivery",
-                  "enabled": False, "payload": "p",
-                  "vuln": {"component": "legacy-app", "cve_id": "CVE-2020-1",
-                           "affected_version": "1.2.3",
-                           "trigger": {"path": "/legacy", "pattern": "id 含 SQLi"},
-                           "behavior_note": "b", "exp_refs": []}}
+        db = TestDB(str(tmp_path / "ars_mig.sqlite"))
+        ars = Arsenal(db)          # 种子已是 v3, __init__ 内迁移对它们无变化
+        # 直写 v2 形态行: 一把用户自建 vuln + 一把无 objective 的 exp
+        legacy_vuln = {"id": "VULN-USER-V2", "name": "用户旧武器", "class": "vuln",
+                       "type": "vuln", "stage": "sensor", "mount": "delivery",
+                       "enabled": False, "payload": "p",
+                       "vuln": {"component": "acme portal module",
+                                "cve_id": "CVE-2020-2", "affected_version": "3.0.0",
+                                "trigger": {"path": "/portal/dl", "pattern": "path 含 .."},
+                                "behavior_note": "b", "exp_refs": []}}
+        legacy_exp = {"id": "EXP-USER-V2", "name": "用户旧链", "class": "exp",
+                      "type": "vuln", "stage": "sensor", "mount": "delivery",
+                      "enabled": False, "payload": "p",
+                      "exp": {"targets_vuln": "VULN-USER-V2", "success_effect": "env",
+                              "stages": [{"name": "s", "primitive": "read",
+                                          "delivery_object": "content",
+                                          "condition": "回显 root:x:0:0", "payload": "x"}]}}
         with db._conn() as c:
-            c.execute("INSERT OR REPLACE INTO arsenal VALUES (?,?,?)",
-                      (legacy["id"], json.dumps(legacy, ensure_ascii=False),
-                       time.time()))
-        w = ars.get("VULN-LEGACY-1")
-        v = w["vuln"]
-        assert v["program"] == "legacy-app"                    # component → program
-        assert v["affected_versions"] == "1.2.3"               # 单数 → 复数
-        assert v["trigger_conditions"] == "id 含 SQLi"          # trigger.pattern → 条件
-        assert v["deploy"]["world_endpoint"] == "/legacy"       # trigger.path → 布设
-        # 派生不落库: 原始 json 仍是 v2 字段
-        raw = db.query("SELECT json FROM arsenal WHERE weapon_id='VULN-LEGACY-1'")[0]["json"]
-        assert "affected_versions" not in raw and '"deploy"' not in raw
-        # 下发通道 (push_payload 经 list→_norm) 推出去的是已映射形态
-        ars.set_enabled("VULN-LEGACY-1", True)
-        pushed = json.loads(ars.push_payload())
-        pv = next(x for x in pushed if x["id"] == "VULN-LEGACY-1")["vuln"]
-        assert pv["program"] == "legacy-app"
-        assert pv["deploy"]["world_endpoint"] == "/legacy"
+            for w in (legacy_vuln, legacy_exp):
+                c.execute("INSERT OR REPLACE INTO arsenal VALUES (?,?,?)",
+                          (w["id"], json.dumps(w, ensure_ascii=False), time.time()))
+        n = migrate_v2_weapons(db)
+        assert n == 2
+        # vuln 转后形态: v3 字段齐, v2 字段删
+        v = ars.get("VULN-USER-V2")["vuln"]
+        assert v["program"] == "acme"
+        assert v["affected_versions"] == "3.0.0"
+        assert v["trigger_conditions"] == "path 参数含 .."
+        assert v["payload_template"] == "GET /portal/dl?path=../../../../etc/passwd"
+        assert v["success_criteria"] == "回显 root:x:0:0 = 利用成功"
+        assert v["primitive"] == "read" and v["source"] == "research"
+        assert v["confidence"] == "confirmed"
+        assert v["deploy"]["world_endpoint"] == "/portal/dl"
+        for old in ("component", "affected_version", "trigger"):
+            assert old not in v
+        # exp 转后: objective 补上, condition 保持原判据
+        e = ars.get("EXP-USER-V2")["exp"]
+        assert e["objective"] == "数据"
+        assert e["stages"][0]["condition"] == "回显 root:x:0:0"
+        # 幂等: 再转无变化; 已 v3 的种子行不动
+        assert migrate_v2_weapons(db) == 0
+        import json as _j
+        seed_vuln = _j.loads(db.query(
+            "SELECT json FROM arsenal WHERE weapon_id='VULN-RCE-ACTUATOR'")[0]["json"])["vuln"]
+        assert "deploy" not in seed_vuln and seed_vuln["program"] == "spring-boot-actuator"
 
     def test_arsenal_seed_v3_overwrite(self, tmp_path):
         """种子版本机制: SEED_VERSION 存 settings; 版本变化时同 id 种子覆盖更新
@@ -2597,8 +2615,8 @@ class TestProductP2:
                          "stage": "sensor", "mount": "nowhere"}):
                 st, j = post({"action": "save", "weapon": bad})
                 assert st == 400 and "error" in j, f"应 400: {bad['id']}"
-            # arsenal v2 校验: 缺 component 的 vuln → 400; stages 空的 exp → 400;
-            # stage 缺字段/非法 primitive → 400
+            # arsenal v3 校验: 缺 program/primitive/source 的 vuln → 400; stages 空的 exp → 400;
+            # stage 缺字段/非法 primitive → 400; 非法 objective → 400
             for bad in (
                     {"id": "W-VULN-BAD", "payload": "p", "class": "vuln",
                      "type": "vuln", "stage": "sensor", "mount": "delivery",

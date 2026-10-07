@@ -258,7 +258,7 @@ def _weapon_error(w: dict) -> str:
         return "stage 需为 sensor/c2"
     if w.get("mount") not in _WMOUNTS:
         return "mount 需为 delivery/ladder/c2_next_stage/mcp_desc/js_bait"
-    # ---- arsenal v2: 实体类别校验 (class 缺省 = v1 旧行, 按 type 派生, 不检) ----
+    # ---- 实体类别校验 (class 缺省 = 旧行, 按 type 派生, 不检) ----
     cls = w.get("class")
     if cls is not None and cls not in _WCLASS:
         return "class 需为 prompt/vuln/exp/mcp/cli"

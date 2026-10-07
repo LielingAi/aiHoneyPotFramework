@@ -125,20 +125,6 @@ class TestArsenalMount:
         sensor_cache().load_push("[]")
         assert mount_table() == {}
 
-    def test_mount_legacy_v2_trigger_path_fallback(self, clean_engines):
-        """v2 旧行兼容: 无 deploy 块的武器按 trigger.path 挂载 (hive 直推旧形态)"""
-        from core.arsenal import sensor_cache
-        weapon = {"id": "VULN-LEG-1", "class": "vuln", "enabled": True,
-                  "vuln": {"component": "legacy module", "cve_id": "",
-                           "affected_version": "1.0.0",
-                           "trigger": {"path": "/api/legacy", "pattern": "path 含 .."}}}
-        sensor_cache().load_push(json.dumps([weapon]))
-        assert "/api/legacy" in mount_table()
-        # render 也走旧字段回退 (pattern→模板路由, component/affected_version→指纹)
-        body, status, ctype, hdr = render_mounted(
-            weapon, "/api/legacy?path=../../etc/passwd", "GET", None)
-        assert status == "200" and "root:x:0:0" in body
-
     def test_sqli_boolean_diff_template(self, clean_engines):
         """SQL 模板: 真条件 1 行 / 假条件 0 行, 附 version() 字样"""
         weapon = {"id": "VULN-Q-1", "class": "vuln", "enabled": True,
@@ -178,9 +164,11 @@ class TestArsenalMount:
         import json as _json
         from core.arsenal import sensor_cache
         weapon = {"id": "VULN-SW-1", "class": "vuln", "enabled": True,
-                  "vuln": {"component": "nexus-gateway download module",
-                           "cve_id": "CVE-2026-43110", "affected_version": "2.4.1",
-                           "trigger": {"path": "/api/download", "pattern": "path 含 .."},
+                  "vuln": {"program": "nexus-gateway download module",
+                           "cve_id": "CVE-2026-43110", "affected_versions": "2.4.1",
+                           "primitive": "read", "source": "research",
+                           "trigger_conditions": "path 参数含 .. (目录穿越读文件)",
+                           "deploy": {"world_endpoint": "/api/download"},
                            "behavior_note": "b", "exp_refs": []}}
         sensor_cache().load_push(_json.dumps([weapon]))
         from main import build_response

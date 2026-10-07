@@ -529,10 +529,9 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
             from core.arsenal_mount import mount_table
             for mp, w in mount_table().items():
                 vn = (w.get("vuln") or {})
-                tc = str(vn.get("trigger_conditions") or
-                         (vn.get("trigger") or {}).get("pattern", "") or "")
-                comp = vn.get("program") or vn.get("component") or "module"
-                ver = vn.get("affected_versions") or vn.get("affected_version") or v
+                tc = str(vn.get("trigger_conditions") or "")
+                comp = vn.get("program") or "module"
+                ver = vn.get("affected_versions") or v
                 param = "path" if (".." in tc or "穿越" in tc or "路径" in tc) else "q"
                 paths[mp] = {"get": {
                     "summary": f"{comp} file fetch",
@@ -1366,7 +1365,7 @@ async def handle_http_request(reader, writer, port: int = 8080):
         _cm_journal(sess_id, "vuln_mounted",
                     f"[weapon:{_vuln_hit['id']}] 布设端点命中 {method} {full_path} "
                     f"→ 按 trigger_conditions 渲染 {_vstatus} "
-                    f"(program={(_vuln_hit.get('vuln') or {}).get('program') or (_vuln_hit.get('vuln') or {}).get('component', '')})")
+                    f"(program={(_vuln_hit.get('vuln') or {}).get('program', '')})")
         print_request_line(method, full_path, _vstatus)
         return
 

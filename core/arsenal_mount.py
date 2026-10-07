@@ -3,10 +3,10 @@
 vuln 实体此前"只登记不布设": 世界代码里没有那个端点, 登记即死档。
 本模块把传感器缓存里 enabled+class=vuln 的实体热挂载成真实路由:
 
-  mount_table()     — 从 sensor_cache() 构建 {trigger.path: 武器实体} 路由表
+  mount_table()     — 从 sensor_cache() 构建 {deploy.world_endpoint: 武器实体} 路由表
                       config 刷新 (load_push) 时由 config_agent 回调 rebuild_mounts()
                       重build;  weapons 列表对象身份变化也会自动触发重建 (双保险)
-  render_mounted()  — 按 vuln.trigger.pattern 关键词选行为模板渲染假漏洞响应:
+  render_mounted()  — 按 vuln.trigger_conditions 关键词选行为模板渲染假漏洞响应:
       pattern 含 ".."/"traversal"/"路径" → 假文件读取 (世界一致的 passwd/config 坐标)
       pattern 含 SQL/"注入"             → 布尔差分假响应 (真 1 行/假 0 行 + version())
       其他                              → 通用 CVE 指纹模板 (错误回显 + 堆栈 + 内网坐标)
@@ -32,13 +32,10 @@ _SRC_ID: Optional[int] = None
 
 
 def _deploy_path(v: dict) -> str:
-    """布设端点 — v3 优先 deploy.world_endpoint, 回退 v2 旧行 trigger.path"""
+    """布设端点 — 只读 v3 deploy.world_endpoint (知识可以不布设 → 空串不挂载)"""
     deploy = v.get("deploy")
     if isinstance(deploy, dict) and str(deploy.get("world_endpoint") or "").strip():
         return str(deploy["world_endpoint"]).strip()
-    trig = v.get("trigger")
-    if isinstance(trig, dict):
-        return str(trig.get("path", "") or "")
     return ""
 
 
@@ -56,7 +53,7 @@ def _rebuild():
 
 
 def mount_table() -> Dict[str, dict]:
-    """{trigger.path: vuln 武器实体} — 热挂载路由表"""
+    """{deploy.world_endpoint: vuln 武器实体} — 热挂载路由表"""
     global _SRC_ID
     if _SRC_ID != id(sensor_cache().weapons):
         _rebuild()
@@ -159,19 +156,17 @@ def _fake_cve_fingerprint(full_path: str, world, comp: str, ver: str) -> Tuple[s
 
 def render_mounted(vuln: dict, full_path: str, method: str,
                    sess_world=None) -> Tuple[str, str, str, Dict[str, str]]:
-    """按 trigger.pattern 关键词选行为模板, 渲染布设端点响应
+    """按 trigger_conditions 关键词选行为模板, 渲染布设端点响应
 
     返回 (body, status, content_type, extra_headers) — main.py 命中后写响应直接 return。
     cve_id 非空时体内容带 CVE 指纹, X-CVE-Advisory 头与 Server 头互证。
     """
     v = vuln.get("vuln") or {}
-    comp = v.get("program") or v.get("component") or "nexus-gateway module"
-    ver = v.get("affected_versions") or v.get("affected_version") or \
+    comp = v.get("program") or "nexus-gateway module"
+    ver = v.get("affected_versions") or \
         _world_field(sess_world, "gateway_version", "2.4.1")
     cve = (v.get("cve_id") or "").strip()
-    # v3 trigger_conditions 优先, 回退 v2 旧行 trigger.pattern
-    trig = v.get("trigger") if isinstance(v.get("trigger"), dict) else {}
-    pattern = str(v.get("trigger_conditions") or trig.get("pattern") or "")
+    pattern = str(v.get("trigger_conditions") or "")
     low_pattern = pattern.lower()
 
     if ".." in pattern or "traversal" in low_pattern or "路径" in pattern:

@@ -9,9 +9,9 @@
 不是蜜罐布景。分层: 战场(假世界/传感器)=接触面; 武器=反制知识本体;
 mount=投送方式; 战果=数据/提示词/控制权。
 
-武器 (arsenal v3 schema, 向后兼容):
+武器 (arsenal v3 schema):
   {id, name, class, type, stage, payload, mount, enabled, craft?, vuln?, exp?}
-  class: 实体类别 — prompt | vuln | exp | mcp | cli  (v2 新增, 旧行读时自动派生)
+  class: 实体类别 — prompt | vuln | exp | mcp | cli  (缺省按 type 派生)
   type:  载体标签 — prompt | vuln | mcp | cli        (v1 原字段保留, 降级为物理通道)
   stage: sensor (开口子) | c2 (深层次)
   mount: 投送方式 — delivery(交付受理) | ladder(阶梯话术) | c2_next_stage | mcp_desc | js_bait
@@ -24,8 +24,7 @@ vuln 类实体 (利用方案知识档案 — v3 知识本体化):
          source: research|feed|zero-day, confidence: confirmed|probable,
          deploy: {world_endpoint?},  # 投送配置可空 — 知识可以不布设纯检测
          behavior_note, exp_refs:[exp武器id]}
-  v2 旧行读时自动映射: trigger:{path,pattern}→deploy/trigger_conditions,
-  affected_version→affected_versions, component→program (_norm 里做, 不落库)。
+  v2 旧行经 migrate_v2_weapons 一次性转 v3 落库 (幂等, __init__ 调用)。
 
 exp 类实体 (利用动作链 — 参照 research/weapon-doctrine.md §2.3.4):
   exp: {targets_vuln, objective(反制目标): 控制|数据|提示词,
@@ -41,6 +40,7 @@ exp 类实体 (利用动作链 — 参照 research/weapon-doctrine.md §2.3.4):
 """
 
 import json
+import re
 import time
 from typing import Dict, List
 
@@ -263,7 +263,7 @@ SEED_VERSION_KEY = "arsenal_seed_version"
 
 
 def derive_class(w: Dict) -> str:
-    """武器实体类别 — v2 新行读 class; v1 旧行按 type 自动派生"""
+    """武器实体类别 — 行内读 class; 缺省按 type 自动派生"""
     cls = w.get("class")
     if cls in CLASSES:
         return cls
@@ -271,41 +271,93 @@ def derive_class(w: Dict) -> str:
         else "prompt"
 
 
-def _norm_vuln(w: Dict) -> Dict:
-    """vuln 知识档案 v2→v3 兼容映射 — 读旧行时自动派生新字段 (派生不落库):
-      trigger.path   → deploy.world_endpoint   (旧登记端点 = 投送配置)
-      trigger.pattern → trigger_conditions      (自然语言触发条件)
-      affected_version → affected_versions      (可逗号分隔多版本)
-      component       → program                (目标程序)
-    """
-    v = w.get("vuln")
-    if not isinstance(v, dict):
-        return w
-    v = dict(v)
-    if not v.get("affected_versions") and v.get("affected_version"):
-        v["affected_versions"] = v["affected_version"]
-    trig = v.get("trigger")
-    if isinstance(trig, dict):
-        if not v.get("trigger_conditions") and trig.get("pattern"):
-            v["trigger_conditions"] = trig["pattern"]
-        deploy = v.get("deploy")
-        if not (isinstance(deploy, dict) and deploy.get("world_endpoint")) \
-                and trig.get("path"):
-            v["deploy"] = {**(deploy if isinstance(deploy, dict) else {}),
-                           "world_endpoint": trig["path"]}
-    if not v.get("program") and v.get("component"):
-        v["program"] = v["component"]
-    w = dict(w)
-    w["vuln"] = v
-    return w
-
-
 def _norm(w: Dict) -> Dict:
     w = dict(w)
     w["class"] = derive_class(w)
-    if isinstance(w.get("vuln"), dict):
-        w = _norm_vuln(w)
     return w
+
+
+# ============ v2→v3 一次性迁移 (WREN 不兼容原则: 旧形态转落库, 不留兼容层) ============
+
+_V2_PARAM_RE = re.compile(r"^(\S+) 含")
+
+
+def _migrate_vuln_block(v: dict) -> dict:
+    """v2 vuln 块 → v3 知识档案。幂等: 已 v3 的行 (program 存在且无 trigger) 原样返回。
+
+    字段来源: component 首词 → program; affected_version → affected_versions;
+    trigger.pattern → trigger_conditions (顺手把 v2 "path 含" 惯用语正名为 "path 参数含");
+    trigger.path → deploy.world_endpoint。migration 缺省: primitive=read
+    (v2 未登记原语, 本框架知识档案以读原语为主), source=research, confidence=confirmed;
+    payload_template/success_criteria 按 pattern 关键词启发式生成。v2 字段转完即删。
+    """
+    if v.get("program") and not isinstance(v.get("trigger"), dict):
+        return v                      # 已 v3 — 跳过
+    v = dict(v)
+    trig = v.get("trigger") if isinstance(v.get("trigger"), dict) else {}
+    pattern = str(trig.get("pattern", "") or "")
+    low = (pattern + " " + str(v.get("behavior_note", "") or "")).lower()
+    is_sqli = "sql" in low or "注入" in pattern
+    is_trav = ".." in pattern or "traversal" in low or "路径" in pattern
+    if not v.get("program"):
+        words = str(v.get("component", "") or "").split()
+        v["program"] = words[0] if words else "unknown"
+    if not v.get("affected_versions") and v.get("affected_version"):
+        v["affected_versions"] = v["affected_version"]
+    if not v.get("trigger_conditions") and pattern:
+        v["trigger_conditions"] = _V2_PARAM_RE.sub(r"\1 参数含", pattern)
+    if not v.get("payload_template"):
+        path = str(trig.get("path", "") or "")
+        if is_trav:
+            v["payload_template"] = f"GET {path}?path=../../../../etc/passwd"
+        elif is_sqli:
+            v["payload_template"] = f"q=1' AND '1'='1  ({path} 布尔差分)"
+        else:
+            v["payload_template"] = f"GET {path}" if path else ""
+    if not v.get("success_criteria"):
+        if is_trav:
+            v["success_criteria"] = "回显 root:x:0:0 = 利用成功"
+        elif is_sqli:
+            v["success_criteria"] = "真/假条件响应行数不同 = 可注入"
+        else:
+            v["success_criteria"] = "响应回显目标程序特征 = 利用成功"
+    v.setdefault("primitive", "read")
+    v.setdefault("source", "research")
+    v.setdefault("confidence", "confirmed")
+    if trig.get("path") and not (isinstance(v.get("deploy"), dict)
+                                 and v["deploy"].get("world_endpoint")):
+        v["deploy"] = {"world_endpoint": trig["path"]}
+    for old in ("component", "affected_version", "trigger"):
+        v.pop(old, None)              # v2 字段转完即删
+    return v
+
+
+def migrate_v2_weapons(db) -> int:
+    """扫 arsenal 表, 凡 v2 字段形态的行 (vuln.trigger 或无 vuln.program) 转 v3 落库;
+    exp 块缺 objective 的补 "数据"。幂等 (再转无变化), 返回迁移行数。
+    用户自建的 v2 武器同样生效 — 不只是种子。"""
+    migrated = 0
+    for r in db.query("SELECT weapon_id, json FROM arsenal"):
+        try:
+            w = json.loads(r["json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        orig = json.dumps(w, ensure_ascii=False, sort_keys=True)
+        cls = derive_class(w)
+        if cls == "vuln" and isinstance(w.get("vuln"), dict):
+            w["vuln"] = _migrate_vuln_block(w["vuln"])
+        elif cls == "exp" and isinstance(w.get("exp"), dict):
+            e = dict(w["exp"])
+            if not e.get("objective"):
+                e["objective"] = "数据"      # v2 未登记反制目标, 默认数据
+            w["exp"] = e
+        if json.dumps(w, ensure_ascii=False, sort_keys=True) != orig:
+            with db._conn() as c:
+                c.execute("UPDATE arsenal SET json=?, updated=? WHERE weapon_id=?",
+                          (json.dumps(w, ensure_ascii=False), time.time(),
+                           r["weapon_id"]))
+            migrated += 1
+    return migrated
 
 
 TABLE = """CREATE TABLE IF NOT EXISTS arsenal(
@@ -318,12 +370,15 @@ class Arsenal:
 
     def __init__(self, db):
         self.db = db
+        with db._conn() as c:
+            c.execute(TABLE)
+        # 一次性 v2→v3 迁移 (幂等): 库里旧形态武器转 v3 落库, 用户自建同样生效
+        migrate_v2_weapons(db)
         # 种子版本机制: 版本变化时同 id 种子 INSERT OR REPLACE 覆盖更新,
         # 用户自建武器 (非种子 id) 不碰; 版本一致则只补缺失 (INSERT OR IGNORE)
         stored = db.get_setting(SEED_VERSION_KEY, "")
         fresh = stored != SEED_VERSION
         with db._conn() as c:
-            c.execute(TABLE)
             for w in SEED_WEAPONS:
                 stmt = ("INSERT OR REPLACE INTO arsenal VALUES (?,?,?)" if fresh
                         else "INSERT OR IGNORE INTO arsenal VALUES (?,?,?)")
