@@ -1279,6 +1279,36 @@ function weaponCard(w, opts) {
   return carrierWeaponCard(w, opts);
 }
 
+/* 武器效能徽标 — 后端 /api/arsenal 每行附 effects (cm_actions [weapon:id] 聚合)
+   无命中 = 诚实显示「未实战」, 不粉饰; 最近命中 = 相对时间 */
+function effectBadges(w) {
+  const fx = w.effects || {};
+  const hits = fx.hits || 0;
+  if (!hits) {
+    return h("div", { style: "display:flex;gap:6px;align-items:center;margin-top:8px" },
+      pill("未实战", "dim"));
+  }
+  const cls = w.class || w.type || "prompt";
+  const els = [];
+  if (cls === "vuln") {
+    els.push(pill(`布设命中 ${fx.mounted_hit || 0}`, "warn"));
+  } else if (cls === "exp") {
+    els.push(pill(`开链 ${fx.chain_open || 0}`, "purple"));
+    els.push(pill(`推进 ${fx.chain_advance || 0}`, "purple"));
+    if (fx.chain_complete) els.push(pill(`✓ 走完全链 ${fx.chain_complete}`, "ok"));
+  } else {
+    els.push(pill(`命中 ${hits}`, "ok"));
+  }
+  if (fx.last_hit) {
+    const ago = Math.max(0, Date.now() / 1000 - fx.last_hit);
+    const txt = ago < 3600 ? `${Math.round(ago / 60)} 分钟前`
+      : ago < 86400 ? `${Math.round(ago / 3600)} 小时前`
+      : `${Math.round(ago / 86400)} 天前`;
+    els.push(h("span", { class: "faint", style: "font-size:10.5px" }, `最近命中 ${txt}`));
+  }
+  return h("div", { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px" }, ...els);
+}
+
 /* 卡片底部公共件: 开关 + 编辑/删除 */
 function weaponCardFooter(w, { onChanged, onEdit }) {
   const tog = h("input", { type: "checkbox", checked: !!w.enabled });
@@ -1346,6 +1376,7 @@ function vulnWeaponCard(w, { onChanged, onEdit, cards }) {
       row("触发", trig.path ? `${trig.path} · ${trig.pattern || ""}` : "", true),
       row("行为", v.behavior_note)),
     w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-top:4px" }, w.note) : null,
+    effectBadges(w),
     h("div", { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px" },
       h("span", { class: "muted", style: "font-size:11.5px" }, `关联 EXP: ${refs.length}`),
       ...refs.map((rid) => h("button", { class: "ctl", style: "font-size:11px",
@@ -1395,6 +1426,7 @@ function expWeaponCard(w, { onChanged, onEdit, cards }) {
         title: "定位到该漏洞卡", onclick: () => flashCard(cards || {}, e.targets_vuln) },
         h("span", { class: "mono" }, e.targets_vuln)) : null),
     w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-top:4px" }, w.note) : null,
+    effectBadges(w),
     wBtns);
 }
 
@@ -1433,6 +1465,7 @@ function carrierWeaponCard(w, { onChanged, onEdit }) {
     h("div", { class: "mono", style: "font-size:11px;color:var(--dim);word-break:break-all" },
       full.slice(0, 90) + (expandable ? "…" : ""), hint),
     pre,
+    effectBadges(w),
     h("div", { style: "display:flex;gap:6px;justify-content:flex-end;margin-top:8px" },
       h("button", { class: "btn", style: "padding:3px 10px;font-size:11.5px",
         onclick: (e) => { e.stopPropagation(); onEdit(); } }, "编辑"),

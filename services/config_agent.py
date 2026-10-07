@@ -92,6 +92,12 @@ class ConfigAgent:
             elif key == ARSENAL_KEY:
                 from core.arsenal import sensor_cache
                 sensor_cache().load_push(str(val))
+                # 热挂载: vuln 布设路由表随 config 刷新重build
+                try:
+                    from core.arsenal_mount import rebuild_mounts
+                    rebuild_mounts()
+                except Exception:
+                    pass
             elif key in ALERT_KEYS:
                 from services import alerter
                 alerter.CONFIG[key] = str(val)

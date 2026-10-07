@@ -209,6 +209,34 @@ _WID_RE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
 _WCLASS = {"prompt", "vuln", "exp", "mcp", "cli"}
 _EXP_PRIMITIVES = {"read", "write", "ask", "execute", "beacon"}
 _EXP_OBJECTS = {"content", "output", "description", "instruction"}
+_WEAPON_TAG = re.compile(r"\[weapon:([^\]]+)\]")
+
+
+def _weapon_effects(db) -> dict:
+    """武器效能聚合 — cm_actions 的 [weapon:id] 归因 + exp 链推进统计
+
+    每武器: hits(总命中) mounted_hit(布设端点命中) chain_open/advance/complete
+    (链推进) last_hit(最近命中 ts) — 前端效能徽标数据源
+    """
+    out: dict = {}
+    for r in db.query("SELECT kind, detail, ts FROM cm_actions"):
+        m = _WEAPON_TAG.search(r["detail"] or "")
+        if not m:
+            continue
+        e = out.setdefault(m.group(1), {
+            "hits": 0, "mounted_hit": 0, "chain_open": 0,
+            "chain_advance": 0, "chain_complete": 0, "last_hit": 0})
+        e["hits"] += 1
+        if r["kind"] == "vuln_mounted":
+            e["mounted_hit"] += 1
+        elif r["kind"] == "exp_chain_open":
+            e["chain_open"] += 1
+        elif r["kind"] == "exp_stage_advance":
+            e["chain_advance"] += 1
+        elif r["kind"] == "exp_chain_complete":
+            e["chain_complete"] += 1
+        e["last_hit"] = max(e["last_hit"], float(r["ts"] or 0))
+    return out
 
 
 def _weapon_error(w: dict) -> str:
@@ -873,7 +901,13 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/arsenal":
             from core.arsenal import Arsenal
             ars = Arsenal(DB)
-            self._send(200, json.dumps(ars.list(), ensure_ascii=False).encode(),
+            fx = _weapon_effects(DB)
+            weapons = ars.list()
+            for w in weapons:
+                w["effects"] = fx.get(w["id"], {
+                    "hits": 0, "mounted_hit": 0, "chain_open": 0,
+                    "chain_advance": 0, "chain_complete": 0, "last_hit": 0})
+            self._send(200, json.dumps(weapons, ensure_ascii=False).encode(),
                        "application/json")
         elif parsed.path == "/api/cm_actions":
             kind = qs.get("kind", [""])[0]

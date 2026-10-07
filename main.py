@@ -592,6 +592,14 @@ async def handle_http_request(reader, writer, port: int = 8080):
         derived = hashlib.md5(f"{client_ip}:{user_agent[:80]}".encode()).hexdigest()[:16]
         sess_id = "auto_" + derived
 
+    # EXP 编排追踪: 纯 request 侧匹配利用链推进 (不依赖响应体, 乱序不计命中)
+    try:
+        from core.exp_tracker import track as _exp_track
+        _exp_track(sess_id, method, full_path,
+                   body_prefix.decode("utf-8", errors="ignore"))
+    except Exception:
+        pass
+
     if _ip_blocked(client_ip):
         _record_request(sess_id or "blocked", client_ip, method, full_path,
                         user_agent, False, "blocked", 0.0, [], 0, 0, False)
@@ -1274,6 +1282,42 @@ async def handle_http_request(reader, writer, port: int = 8080):
         await writer.drain()
         writer.close()
         print_request_line(method, full_path, a_status)
+        return
+
+    # ---- 动态布设引擎: vuln 武器热挂载端点 (所有硬编码路由 miss 后的布设面) ----
+    # 世界此前"只登记不布设"的 vuln 实体, 经 config 下发缓存后在此成为真实端点
+    from core.arsenal_mount import mount_table, render_mounted
+    _vuln_hit = mount_table().get(path)
+    if _vuln_hit:
+        _vbody, _vstatus, _vctype, _vheaders = render_mounted(
+            _vuln_hit, full_path, method, store["sessions"][sess_id].get("world"))
+        _vreason = {"200": "OK", "403": "Forbidden", "404": "Not Found",
+                    "500": "Internal Server Error"}.get(_vstatus, "OK")
+        _vextra = "".join(f"{k}: {v}\r\n" for k, v in _vheaders.items())
+        http_response = (
+            f"HTTP/1.1 {_vstatus} {_vreason}\r\n"
+            f"Content-Type: {_vctype}\r\n"
+            f"Content-Length: {len(_vbody.encode('utf-8'))}\r\n"
+            f"Server: nexus-gateway/{world.gateway_version if world else '2.4.1'}\r\n"
+            + _vextra
+            + f"Set-Cookie: sid={sess_id}; Path=/\r\n"
+            + "Connection: close\r\n\r\n" + _vbody
+        )
+        writer.write(http_response.encode())
+        await writer.drain()
+        writer.close()
+        _record_request(sess_id=sess_id, client_ip=client_ip, method=method,
+                        full_path=full_path, user_agent=user_agent, is_ai=is_ai,
+                        agent_type=agent_str, threat=threat_score,
+                        families=[f.value if hasattr(f, "value") else str(f) for f in families],
+                        auth_level=store["sessions"][sess_id]["auth"].get("level", 0),
+                        fabricated=len(store["sessions"][sess_id]["auth"].get("fabricated", [])),
+                        canary=canary_hit)
+        _cm_journal(sess_id, "vuln_mounted",
+                    f"[weapon:{_vuln_hit['id']}] 布设端点命中 {method} {full_path} "
+                    f"→ 按 trigger.pattern 渲染 {_vstatus} "
+                    f"(component={(_vuln_hit.get('vuln') or {}).get('component', '')})")
+        print_request_line(method, full_path, _vstatus)
         return
 
     # 正常响应
