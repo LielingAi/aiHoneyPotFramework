@@ -511,7 +511,10 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self._send(404, b"not found", "text/plain")
             return
-        self._send(200, body, _static_type(full))
+        # 开发/实战部署模式: js/css/html 一律 no-cache — 前端热更新即时生效,
+        # 浏览器缓存旧 JS 曾造成"代码修了但看不到新行为"的连环误会
+        self._send(200, body, _static_type(full),
+                   {"Cache-Control": "no-cache, must-revalidate"})
 
     def _send(self, code: int, body: bytes, ctype: str, extra=None):
         self.send_response(code)
