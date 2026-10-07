@@ -113,8 +113,10 @@ class SensorShipper:
         intel = [r for r in batch if r.get("_kind") == "intel"]
         beacons = [r for r in batch if r.get("_kind") == "beacon"]
         cm = [r for r in batch if r.get("_kind") == "cm_action"]
+        metas = [r for r in batch if r.get("_kind") == "meta"]
         body = json.dumps({"requests": reqs, "intel": intel,
-                           "beacons": beacons, "cm_actions": cm}).encode("utf-8")
+                           "beacons": beacons, "cm_actions": cm,
+                           "meta": metas}).encode("utf-8")
         req = urllib.request.Request(
             f"{self.hive_url}/ingest", data=body,
             headers={"Content-Type": "application/json",

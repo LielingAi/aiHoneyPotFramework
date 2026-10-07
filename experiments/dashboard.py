@@ -536,6 +536,13 @@ class Handler(BaseHTTPRequestHandler):
             n_int = DB.ingest_intel(payload.get("intel", []))
             n_bcn = DB.ingest_beacons(payload.get("beacons", []))
             n_cm = DB.ingest_cm(payload.get("cm_actions", []))
+            # meta: 传感器上送的配置型数据 (世界表面目录等) → settings 键
+            n_meta = 0
+            for m in payload.get("meta", []):
+                key = str(m.get("key", "")).strip()
+                if key:
+                    DB.set_setting(key, str(m.get("value", "")))
+                    n_meta += 1
             for sid in {r.get("run_id", "").replace("sensor_", "", 1)
                         for r in payload.get("requests", [])
                         + payload.get("intel", [])
@@ -549,9 +556,10 @@ class Handler(BaseHTTPRequestHandler):
                     alerter.check_intel(r)
             except Exception:
                 pass
-            self._send(200, json.dumps({"ingested": n_req + n_int + n_bcn + n_cm,
+            self._send(200, json.dumps({"ingested": n_req + n_int + n_bcn + n_cm + n_meta,
                                         "requests": n_req, "intel": n_int,
-                                        "beacons": n_bcn, "cm_actions": n_cm}
+                                        "beacons": n_bcn, "cm_actions": n_cm,
+                                        "meta": n_meta}
                                        ).encode(), "application/json")
             return
         if parsed.path == "/api/config":
@@ -890,6 +898,20 @@ class Handler(BaseHTTPRequestHandler):
             tasks = _manual_task_queue()
             DB.set_setting("tasking_manual_que", "[]")
             self._send(200, json.dumps({"tasks": tasks},
+                                       ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/world/surface":
+            # 武器构建器数据源: 世界表面端点目录 (传感器上送, 无则回退本地常量)
+            raw = DB.get_setting("world_surface", "")
+            surface = []
+            if raw:
+                try:
+                    surface = json.loads(raw)
+                except json.JSONDecodeError:
+                    surface = []
+            if not surface:
+                from main import WORLD_SURFACE
+                surface = WORLD_SURFACE
+            self._send(200, json.dumps({"surface": surface},
                                        ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/blocklist":
             self._send(200, json.dumps(

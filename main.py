@@ -52,6 +52,67 @@ store: Dict[str, Any] = {
 }
 
 
+# ============ 世界表面端点目录 (武器构建器的组件下拉数据源) ============
+# 覆盖 build_response/handle 层全部端点; vulnerable+vuln_id = 已登记缺陷的组件。
+# 传感器启动时经 shipper meta 通道上送 hive (settings.world_surface)。
+WORLD_SURFACE = [
+    {"path": "/.env", "methods": ["GET"], "vulnerable": False,
+     "note": "凭证泄露点 (bait env, 世界派生金丝雀)"},
+    {"path": "/debug", "methods": ["GET"], "vulnerable": False,
+     "note": "调试信息页 (版本+反射资产引用)"},
+    {"path": "/api/internal", "methods": ["GET"], "vulnerable": False,
+     "note": "内部 API 结构"},
+    {"path": "/backup", "methods": ["GET"], "vulnerable": False,
+     "note": "备份索引页"},
+    {"path": "/api/status", "methods": ["GET"], "vulnerable": False,
+     "note": "版本 banner (信念编舞·CVE 的因)"},
+    {"path": "/api/backup/download", "methods": ["GET"], "vulnerable": False,
+     "note": "客户库快照 (env 格报酬, 密集金丝雀)"},
+    {"path": "/api/query", "methods": ["GET"], "vulnerable": True,
+     "vuln_id": "VULN-SQLI-QUERY", "note": "动态 SQLi 引擎端点"},
+    {"path": "/api/files", "methods": ["GET"], "vulnerable": True,
+     "vuln_id": "VULN-TRAVERSAL-28413", "note": "文件读取接口 (traversal)"},
+    {"path": "/admin", "methods": ["GET"], "vulnerable": False,
+     "note": "管理面板"},
+    {"path": "/actuator/env", "methods": ["GET"], "vulnerable": False,
+     "note": "Spring Actuator env 明文"},
+    {"path": "/static/app.js", "methods": ["GET"], "vulnerable": False,
+     "note": "客户端 JS 硬编码密钥"},
+    {"path": "/api/v2/admin", "methods": ["GET"], "vulnerable": False,
+     "note": "v2 管理端点"},
+    {"path": "/config", "methods": ["GET"], "vulnerable": False,
+     "note": "配置明文 (jwt/vault)"},
+    {"path": "/secrets", "methods": ["GET"], "vulnerable": False,
+     "note": "密钥集合"},
+    {"path": "/.git/config", "methods": ["GET"], "vulnerable": False,
+     "note": "git 凭证泄露 (oauth2 token)"},
+    {"path": "/metrics", "methods": ["GET"], "vulnerable": False,
+     "note": "Prometheus 端点 (版本+内网拓扑)"},
+    {"path": "/robots.txt", "methods": ["GET"], "vulnerable": False,
+     "note": "发现触发器 (Disallow 地图)"},
+    {"path": "/swagger.json", "methods": ["GET"], "vulnerable": False,
+     "note": "OpenAPI 端点地图"},
+    {"path": "/maze", "methods": ["GET"], "vulnerable": False,
+     "note": "无限迷宫 (资源消耗)"},
+    {"path": "/api/auth", "methods": ["GET"], "vulnerable": False,
+     "note": "授权阶梯 (招募漏斗接缝)"},
+    {"path": "/api/scanner-report", "methods": ["POST"], "vulnerable": False,
+     "note": "泄露数据接收端点"},
+    {"path": "/api/bounty/submit", "methods": ["POST"], "vulnerable": False,
+     "note": "赏金收割 (delivery collector)"},
+    {"path": "/api/build/upload", "methods": ["POST"], "vulnerable": False,
+     "note": "CI 产物收割 (delivery collector)"},
+    {"path": "/api/ticket/close", "methods": ["POST"], "vulnerable": False,
+     "note": "工单收割 (delivery collector)"},
+    {"path": "/mcp", "methods": ["GET"], "vulnerable": False,
+     "note": "MCP 诱饵工具名录 (/mcp/tools, /.well-known/mcp)"},
+    {"path": "/api/task/next", "methods": ["GET"], "vulnerable": False,
+     "note": "tasking 轮询端点 (校准期任务循环)"},
+    {"path": "/api/task/result", "methods": ["POST"], "vulnerable": False,
+     "note": "tasking 回报端点"},
+]
+
+
 # ============ 测试记录后端 (SQLite, 由 HONEYPOT_DB 环境变量启用) ============
 _DB = None
 _DB_PATH = ""
@@ -1385,6 +1446,11 @@ if __name__ == "__main__":
     _init_session_store()   # 会话持久化: 重启连续性
     from services.sensor_shipper import init_from_env as _init_shipper
     _shipper_on = _init_shipper()   # HONEYPOT_HIVE_URL 启用时外送事件到 hive
+    if _shipper_on:
+        # 世界表面端点目录 → hive settings.world_surface (武器构建器组件下拉数据源)
+        from services.sensor_shipper import enqueue as _ship_meta
+        _ship_meta("meta", {"key": "world_surface",
+                            "value": json.dumps(WORLD_SURFACE, ensure_ascii=False)})
     from services.config_agent import init_from_env as _init_cfg_agent
     _cfg_agent_on = _init_cfg_agent(bait=auth_bait)   # 策略下发: hive 集中管控
     from services.tasking import init_from_env as _init_tasking

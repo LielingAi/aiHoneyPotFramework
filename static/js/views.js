@@ -827,8 +827,6 @@ const WMOUNT_OPTS = [["delivery", "delivery · 交付受理"], ["ladder", "ladde
                      ["mcp_desc", "mcp_desc · MCP 描述"]];
 const WID_RE = /^[A-Za-z0-9_-]{2,40}$/;
 /* arsenal v2 实体类别 — 按 class 分渲染, type 降级为载体标签 */
-const WCLASS_OPTS = [["prompt", "prompt · 话术"], ["vuln", "vuln · 漏洞实体"],
-                     ["exp", "exp · 利用链"], ["mcp", "mcp · 工具"], ["cli", "cli · 命令"]];
 const WCLASS_PILL = { prompt: ["info", "话术"], vuln: ["warn", "漏洞"],
                       exp: ["purple", "EXP"], mcp: ["info", "MCP"], cli: ["info", "CLI"] };
 const EFFECT_PILL = { env: ["ok", "env"], prompt: ["purple", "prompt"],
@@ -866,107 +864,411 @@ function weaponErr(w) {
   return "";
 }
 
-/* 编辑态卡片: 新建 (w.id 空) 与编辑共用; onDone=保存成功后, onCancel=取消 */
-function weaponEditCard(w, { onDone, onCancel }) {
-  const isNew = !w.id;
-  const cls0 = w.class || w.type || "prompt";
-  const st = "background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
-    + "color:var(--text);padding:7px 12px;font-size:12.5px;width:100%";
-  const idI = h("input", { style: st + ";font-family:var(--mono)",
-    placeholder: "武器 ID (如 W-PROMPT-X-1)", value: w.id || "" });
-  if (!isNew) idI.disabled = true;   /* id 即主键, 编辑时不可改 (改名=新建+删除) */
-  const nameI = h("input", { style: st, placeholder: "名称 (如 授权核实·标准)", value: w.name || "" });
-  const noteI = h("input", { style: st, placeholder: "备注 (可选)", value: w.note || "" });
-  const payI = h("textarea", { rows: "5", style: st + ";resize:vertical;font-family:var(--mono);font-size:11.5px",
-    placeholder: "武器载荷本体 — 提示词文本 / 载荷定义" }, w.payload || "");
-  const mkSel = (opts, val) => h("select", { class: "ctl", style: "flex:1;min-width:0" },
-    ...opts.map(([v, t]) => h("option", { value: v, selected: v === val }, t)));
-  const mkIn = (placeholder, val, mono) => h("input", {
-    style: st + (mono ? ";font-family:var(--mono);font-size:11.5px" : ""),
-    placeholder, value: val || "" });
-  /* arsenal v2: class 选择 — vuln 出漏洞实体表单, exp 出利用链编辑器 */
-  const classS = mkSel(WCLASS_OPTS, cls0);
-  const v = w.vuln || {};
-  const trig = v.trigger || {};
-  const vulnCompI = mkIn("组件名 (如 nexus-gateway files module)", v.component, true);
-  const vulnCveI = mkIn("CVE ID (可空)", v.cve_id, true);
-  const vulnVerI = mkIn("影响版本 (可空)", v.affected_version, true);
-  const vulnPathI = mkIn("触发路径 (如 /api/files)", trig.path, true);
-  const vulnPatI = mkIn("触发模式 (如 path 含 ..)", trig.pattern, true);
-  const vulnNoteI = mkIn("行为说明", v.behavior_note);
-  const vulnRefsI = mkIn("关联 EXP id (逗号分隔)", (v.exp_refs || []).join(","), true);
-  const e = w.exp || {};
-  const expTargetI = mkIn("目标漏洞 id (targets_vuln)", e.targets_vuln, true);
-  const expEffectS = mkSel([["env", "env · 环境"], ["prompt", "prompt · 提示词"],
-    ["credentials", "credentials · 凭证"], ["beacon", "beacon · 回连"]],
-    e.success_effect || "env");
-  const stagesTa = h("textarea", { rows: "7",
-    style: st + ";resize:vertical;font-family:var(--mono);font-size:11px",
-    placeholder: 'stages JSON 数组 — 每项 {"name","primitive"(read/write/ask/execute/beacon),'
-      + '"delivery_object"(content/output/description/instruction),"condition","payload"}' },
-    e.stages ? JSON.stringify(e.stages, null, 1) : "");
-  const vulnBox = h("div", { style: "display:grid;gap:8px" },
-    h("div", { class: "t muted" }, "漏洞实体 (vuln)"),
-    h("div", { style: "display:flex;gap:8px" }, vulnCompI, vulnCveI, vulnVerI),
-    h("div", { style: "display:flex;gap:8px" }, vulnPathI, vulnPatI),
-    vulnNoteI, vulnRefsI);
-  const expBox = h("div", { style: "display:grid;gap:8px" },
-    h("div", { class: "t muted" }, "利用链实体 (exp) — stages 为 JSON 数组"),
-    h("div", { style: "display:flex;gap:8px;align-items:center" }, expTargetI,
-      h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "战果"),
-      expEffectS),
-    stagesTa);
-  const typeS = mkSel(WTYPE_OPTS, w.type || "prompt");
-  const stageS = mkSel(WSTAGE_OPTS, w.stage || "sensor");
-  const mountS = mkSel(WMOUNT_OPTS, w.mount || "delivery");
+/* ================= 武器构建器: 三步向导 =================
+   造武器 = 在世界表面布设缺陷 / 编排利用链 / 装配话术。
+   元数据驱动 (WEAPON_CLASSES 注册表), 全程无 JSON 输入; 编辑=第2步预填。 */
+const WEAPON_CLASSES = {
+  prompt: { label: "提示词武器", icon: "✦", cls: "prompt", carrier: "prompt",
+    desc: "把一句指令装进信任通道",
+    example: "例: 授权核实·分片包裹 (W-PROMPT-PROV-2)" },
+  vuln: { label: "漏洞", icon: "⌗", cls: "vuln", carrier: "vuln",
+    desc: "在世界的一个组件上放一个有触发条件/行为链的缺陷",
+    example: "例: 路径穿越·files 模块 (VULN-TRAVERSAL-28413)" },
+  exp: { label: "EXP", icon: "⛁", cls: "exp", carrier: "vuln",
+    desc: "编排一条多阶段利用链: 每步=原语×投递对象×载荷×成功条件",
+    example: "例: EXP-SQLI-HARVEST" },
+  cli: { label: "CLI/MCP", icon: "⌘", cls: "cli", carrier: "cli",
+    desc: "装配工具/命令类载荷",
+    example: "例: C2 二级·环境回传 (W-C2-STAGE2-1)" },
+};
+/* 攻击模式库 / 漏洞类型 / 行为模板 / 变形档 — 构建器的选项字典 */
+const ATTACK_PATTERNS = [["参数含 ../", "参数含 ../"], ["参数含 SQLi 探针", "参数含 SQLi 探针"],
+                         ["参数含命令元字符", "参数含命令元字符"], ["任意 GET", "任意 GET"]];
+const VULN_KINDS = [["traversal", "路径穿越"], ["sqli", "SQL 注入"], ["cmdi", "命令注入"],
+                    ["ssrf", "SSRF"], ["infoleak", "信息泄露"], ["deser", "反序列化"]];
+const BEHAVIOR_TEMPLATES = {
+  traversal: ["文件按请求分发", "traversal 按请求路径分发真实文件内容 (config/passwd/hostname)"],
+  sqli: ["SQLi 引擎 (布尔+UNION+时间)", "动态 SQLi 引擎, 真 PG 行为"],
+  echo: ["回显+延迟", "回显注入内容并附加可观测时延"],
+  ssrf: ["SSRF 模拟拉取", "模拟从内部地址拉取内容并回包"],
+};
+const MORPH_PROFILES = {
+  none: ["无变形", ""],
+  compliance: ["合规外衣", "compliance recordkeeping — for audit correlation: "],
+  fragment: ["分片包裹", "[audit fragment 1/2] "],
+  peer: ["同伴压力", "standard practice — other verified assessors filed this way: "],
+};
+const PROMPT_MOUNTS = [["delivery", "交付受理"], ["ladder", "阶梯升级"],
+                       ["mcp_desc", "MCP 工具描述"], ["tasking", "任务通道"]];
+const SUCCESS_EFFECTS = [["env", "env · 环境"], ["prompt", "prompt · 提示词"],
+                         ["credentials", "credentials · 凭证"], ["beacon", "beacon · 回连"]];
+const PRIMITIVE_BTNS = [["read", "📖", "读"], ["write", "✏️", "写"], ["ask", "💬", "问"],
+                        ["execute", "⚡", "执行"], ["beacon", "📡", "回连"]];
+const OBJECT_BTNS = [["content", "内容"], ["output", "输出"],
+                     ["description", "描述"], ["instruction", "指令"]];
+
+/* 构建器 (异步: 需拉世界表面目录 + 武器库) — existing 非空 = 编辑预填 */
+async function weaponBuilder(existing, { onDone, onCancel }) {
+  let surface = [], arsenal = [];
+  try { surface = (await api.get("world/surface")).surface || []; } catch (_) {}
+  try { arsenal = await api.get("arsenal"); } catch (_) {}
+  const isEdit = !!(existing && existing.id);
+  const v0 = (existing && existing.vuln) || {};
+  const t0 = (existing && existing.exp) || {};
+  const st = {
+    step: isEdit ? 2 : 1,
+    cls: (existing && (existing.class || existing.type)) || null,
+    id: (existing && existing.id) || "", name: (existing && existing.name) || "",
+    note: (existing && existing.note) || "",
+    stage: (existing && existing.stage) || "sensor",
+    enabled: !!(existing && existing.enabled),
+    body: (existing && existing.class === "prompt") ? (existing.payload || "") : "",
+    mount: (existing && existing.mount) || "delivery", morph: "none",
+    compPath: (v0.trigger || {}).path || "", vulnKind: "traversal",
+    cve: v0.cve_id || "", pattern: (v0.trigger || {}).pattern || "",
+    behaviorKey: "", behaviorNote: v0.behavior_note || "",
+    targetVuln: t0.targets_vuln || "",
+    stages: (t0.stages || []).map((s) => ({ ...s })),
+    successEffect: t0.success_effect || "env",
+    cliBody: (existing && existing.class === "cli") ? (existing.payload || "") : "",
+  };
   const err = h("div", { style: "color:var(--bad);font-size:11.5px;min-height:14px" });
-  function syncBoxes() {
-    vulnBox.hidden = classS.value !== "vuln";
-    expBox.hidden = classS.value !== "exp";
+  const stepBox = h("div", {});
+  const head = h("div", { class: "t muted" }, isEdit ? `编辑武器 · ${existing.id}` : "新建武器 — 三步造一把");
+  const root = h("div", { class: "card pad", style: "border-color:var(--accent)" },
+    head, breadcrumb(), stepBox);
+  const inp = (ph, val, mono) => h("input", {
+    style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
+      + "color:var(--text);padding:7px 12px;font-size:12.5px;width:100%"
+      + (mono ? ";font-family:var(--mono);font-size:11.5px" : ""),
+    placeholder: ph, value: val || "" });
+  const ta = (ph, val, rows) => h("textarea", { rows: String(rows || 4),
+    style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
+      + "color:var(--text);padding:7px 12px;font-size:12px;width:100%;resize:vertical;"
+      + "font-family:var(--mono);font-size:11.5px",
+    placeholder: ph }, val || "");
+  const sel = (opts, val) => h("select", { class: "ctl", style: "flex:1;min-width:0" },
+    ...opts.map(([v, t]) => h("option", { value: v, selected: v === val }, t)));
+  const row2 = (a, b) => h("div", { style: "display:flex;gap:8px" }, a, b);
+  const lab = (t) => h("div", { class: "muted", style: "font-size:11.5px;margin:6px 0 3px" }, t);
+
+  /* 已登记漏洞的组件 (角标用) */
+  const vulnPaths = {};
+  for (const w of arsenal) {
+    if (w.class === "vuln" && w.vuln && w.vuln.trigger) vulnPaths[w.vuln.trigger.path] = w.id;
   }
-  classS.addEventListener("change", syncBoxes);
-  syncBoxes();
-  const save = h("button", { class: "btn primary", onclick: async () => {
-    const cls = classS.value;
-    const weapon = { id: idI.value.trim(), name: nameI.value.trim(), class: cls,
-      type: typeS.value, stage: stageS.value, mount: mountS.value, payload: payI.value,
-      note: noteI.value.trim(), enabled: !!w.enabled };
-    if (cls === "vuln") {
-      weapon.vuln = {
-        component: vulnCompI.value.trim(), cve_id: vulnCveI.value.trim(),
-        affected_version: vulnVerI.value.trim(),
-        trigger: { path: vulnPathI.value.trim(), pattern: vulnPatI.value.trim() },
-        behavior_note: vulnNoteI.value.trim(),
-        exp_refs: vulnRefsI.value.split(",").map((x) => x.trim()).filter(Boolean) };
+
+  function breadcrumb() {
+    const names = ["① 选类别", "② 构建", "③ 预览保存"];
+    const bc = h("div", { style: "display:flex;gap:10px;align-items:center;margin:8px 0 12px" });
+    names.forEach((n, i) => {
+      const done = st.step > i + 1;
+      const cur = st.step === i + 1;
+      bc.append(h("span", {
+        style: "font-size:12px;" + (cur ? "font-weight:700;color:var(--accent)"
+          : done ? "color:var(--ok);cursor:pointer" : "color:var(--faint)"),
+        onclick: done ? () => { st.step = i + 1; render(); } : null }, n));
+      if (i < 2) bc.append(h("span", { class: "faint" }, "→"));
+    });
+    return bc;
+  }
+
+  /* ---------- 第 1 步: 四张类别大卡片 ---------- */
+  function renderStep1() {
+    stepBox.replaceChildren(h("div", {
+      style: "display:grid;grid-template-columns:repeat(4,1fr);gap:12px" },
+      ...Object.entries(WEAPON_CLASSES).map(([k, c]) => {
+        const card = h("div", { class: "card pad", style: "cursor:pointer;text-align:left" },
+          h("div", { style: "font-size:26px;color:var(--accent)" }, c.icon),
+          h("div", { style: "font-weight:700;font-size:14px;margin:6px 0 4px" }, c.label),
+          h("div", { style: "font-size:11.5px;color:var(--dim);min-height:48px" }, c.desc),
+          h("div", { class: "faint", style: "font-size:10.5px;margin-top:6px" }, c.example));
+        card.addEventListener("click", () => { st.cls = k; st.step = 2; render(); });
+        card.addEventListener("mouseenter", () => { card.style.borderColor = "var(--accent)"; });
+        card.addEventListener("mouseleave", () => { card.style.borderColor = ""; });
+        return card;
+      })));
+  }
+
+  /* ---------- 第 2 步: 公共区 + 按类别的结构化表单 ---------- */
+  function suggestId() {
+    const pre = { prompt: "W-PROMPT", vuln: "VULN", exp: "EXP", cli: "W-CLI" }[st.cls] || "W-X";
+    const ids = new Set(arsenal.map((w) => w.id));
+    let n = arsenal.filter((w) => (w.class || w.type) === st.cls).length + 1;
+    while (ids.has(`${pre}-${n}`)) n += 1;
+    return `${pre}-${n}`;
+  }
+  function renderStep2() {
+    const c = WEAPON_CLASSES[st.cls];
+    head.textContent = isEdit ? `编辑武器 · ${st.id}` : `新建 · ${c.icon} ${c.label}`;
+    const idI = inp("武器 ID (可改)", st.id); idI.oninput = () => { st.id = idI.value; };
+    if (isEdit) idI.disabled = true;
+    const genBtn = h("button", { class: "btn", style: "white-space:nowrap",
+      onclick: () => { st.id = suggestId(); idI.value = st.id; } }, "生成建议");
+    const nameI = inp("名称", st.name); nameI.oninput = () => { st.name = nameI.value; };
+    const noteI = inp("说明 (可选)", st.note); noteI.oninput = () => { st.note = noteI.value; };
+    const stageSw = h("input", { type: "checkbox", checked: st.stage === "c2" });
+    stageSw.onchange = () => { st.stage = stageSw.checked ? "c2" : "sensor"; };
+    const enSw = h("input", { type: "checkbox", checked: st.enabled });
+    enSw.onchange = () => { st.enabled = enSw.checked; };
+    const common = h("div", { style: "display:grid;gap:8px" },
+      lab("公共"),
+      row2(idI, genBtn),
+      row2(nameI, noteI),
+      h("div", { style: "display:flex;gap:22px;align-items:center;margin-top:2px" },
+        h("label", { style: "display:flex;gap:8px;align-items:center;font-size:12px" },
+          stageSw, h("span", {}, "深层次 (c2)", h("span", { class: "faint" },
+            " — 关=开口子 (sensor)"))),
+        h("label", { style: "display:flex;gap:8px;align-items:center;font-size:12px" },
+          enSw, h("span", {}, "激活 (60s 下发)"))));
+    let specific = null;
+
+    if (st.cls === "prompt") {
+      const bodyTa = ta("载荷本体 — 纯净话术文本 (变形档只影响成品前缀)", st.body, 5);
+      bodyTa.oninput = () => { st.body = bodyTa.value; morphPre.textContent = finalPayload(); };
+      const mountS = sel(PROMPT_MOUNTS, st.mount);
+      mountS.onchange = () => { st.mount = mountS.value; };
+      const morphS = sel(Object.entries(MORPH_PROFILES).map(([k, [l]]) => [k, l]), st.morph);
+      morphS.onchange = () => { st.morph = morphS.value; morphPre.textContent = finalPayload(); };
+      const morphPre = h("pre", { style: "background:var(--bg);border:1px solid var(--border);"
+        + "border-radius:8px;padding:8px;font-size:11px;white-space:pre-wrap;"
+        + "word-break:break-all;max-height:160px;overflow:auto" }, finalPayload());
+      specific = h("div", { style: "display:grid;gap:6px" },
+        lab("提示词 · 载荷 + 挂载 + 变形档"), bodyTa,
+        row2(mountS, morphS), lab("成品预览 (含变形前缀)"), morphPre);
     }
-    if (cls === "exp") {
-      let stages = null;
-      try { stages = JSON.parse(stagesTa.value || "[]"); }
-      catch (_) { err.textContent = "stages 不是合法 JSON 数组"; return; }
-      weapon.exp = { targets_vuln: expTargetI.value.trim(),
-        success_effect: expEffectS.value, stages };
+
+    if (st.cls === "vuln") {
+      const compS = sel([
+        ["", "— 选择世界组件 —"],
+        ...surface.map((e) => [e.path,
+          `${e.path} — ${e.note}${vulnPaths[e.path] ? " [已有漏洞]" : ""}`])],
+        st.compPath);
+      compS.onchange = () => { st.compPath = compS.value; pathOut.textContent = st.compPath; };
+      const kindS = sel(VULN_KINDS, st.vulnKind);
+      kindS.onchange = () => { st.vulnKind = kindS.value; };
+      const cveI = inp("CVE 编号 (可空)", st.cve, true);
+      cveI.oninput = () => { st.cve = cveI.value; };
+      const cveBtn = h("button", { class: "btn", style: "white-space:nowrap",
+        onclick: () => { st.cve = `CVE-2026-${10000 + Math.floor(Math.random() * 90000)}`;
+                         cveI.value = st.cve; } }, "自动生成");
+      const pathOut = h("span", { class: "mono",
+        style: "font-size:11.5px;color:var(--accent)" }, st.compPath || "(先选组件)");
+      const patS = sel(ATTACK_PATTERNS, st.pattern);
+      patS.onchange = () => { st.pattern = patS.value; };
+      const behS = sel([["", "— 行为模板 —"],
+        ...Object.entries(BEHAVIOR_TEMPLATES).map(([k, [l]]) => [k, l])], st.behaviorKey);
+      const behTa = ta("行为说明 (模板可预填, 可改)", st.behaviorNote, 2);
+      behTa.oninput = () => { st.behaviorNote = behTa.value; };
+      behS.onchange = () => { st.behaviorKey = behS.value;
+        if (behS.value) { st.behaviorNote = BEHAVIOR_TEMPLATES[behS.value][1];
+                          behTa.value = st.behaviorNote; } };
+      specific = h("div", { style: "display:grid;gap:6px" },
+        lab("漏洞 · 组件 = 世界表面真实端点"),
+        compS,
+        row2(h("div", { style: "flex:1;display:flex;gap:6px;align-items:center" },
+          h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "触发路径"),
+          pathOut), kindS),
+        row2(h("div", { style: "flex:1;display:flex;gap:6px" }, cveI, cveBtn), patS),
+        lab("行为"), behS, behTa);
     }
-    const e0 = weaponErr(weapon);
-    if (e0) { err.textContent = e0; return; }
-    try {
-      await api.post("arsenal", { action: "save", weapon });
-      toast(`${isNew ? "已创建" : "已保存"} — 60s 内下发全网传感器`);
-      onDone();
-    } catch (e) { err.textContent = e.message; }
-  } }, isNew ? "创建" : "保存");
-  return h("div", { class: "card pad", style: "border-color:var(--accent)" },
-    h("div", { class: "t muted" }, isNew ? "新建武器 — 保存后进入武器库" : `编辑武器 · ${w.id}`),
-    h("div", { style: "display:grid;gap:8px;margin-top:6px" },
-      h("div", { style: "display:flex;gap:8px" }, idI, nameI),
-      h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
-        h("span", { class: "muted", style: "font-size:11.5px" }, "实体类别"), classS,
-        h("span", { class: "muted", style: "font-size:11.5px" }, "载体"), typeS,
-        h("span", { class: "muted", style: "font-size:11.5px" }, "阶段"), stageS,
-        h("span", { class: "muted", style: "font-size:11.5px" }, "挂载"), mountS),
-      vulnBox, expBox,
-      payI, noteI, err,
-      h("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
-        h("button", { class: "btn", onclick: onCancel }, "取消"), save)));
+
+    if (st.cls === "exp") {
+      const vulnOpts = arsenal.filter((w) => w.class === "vuln")
+        .map((w) => [w.id, `${w.id} — ${w.name || ""}`]);
+      const tgtS = sel([["", "— 选择目标漏洞 —"], ...vulnOpts], st.targetVuln);
+      tgtS.onchange = () => { st.targetVuln = tgtS.value; };
+      const stagesBox = h("div", { style: "display:grid;gap:8px" });
+      function stageRow(s, i) {
+        const primBox = h("div", { style: "display:flex;gap:4px;flex-wrap:wrap" },
+          ...PRIMITIVE_BTNS.map(([v, ic, lb]) => h("button", {
+            class: "ctl", title: lb,
+            style: "font-size:12px;padding:3px 7px;" + (s.primitive === v
+              ? "border-color:var(--accent);background:var(--surface2)" : ""),
+            onclick: () => { s.primitive = v; renderStep2(); } }, `${ic}${lb}`)));
+        const objBox = h("div", { style: "display:flex;gap:4px;flex-wrap:wrap" },
+          ...OBJECT_BTNS.map(([v, lb]) => h("button", {
+            class: "ctl", style: "font-size:11px;padding:3px 8px;" + (s.delivery_object === v
+              ? "border-color:var(--accent);background:var(--surface2)" : ""),
+            onclick: () => { s.delivery_object = v; renderStep2(); } }, lb)));
+        const nameI2 = inp(`步骤 ${i + 1} 名称`, s.name);
+        nameI2.oninput = () => { s.name = nameI2.value; };
+        const payTa = ta("该步载荷 (请求/命令/话术)", s.payload, 2);
+        payTa.oninput = () => { s.payload = payTa.value; };
+        const condI = inp("成功条件 (自然语言)", s.condition);
+        condI.oninput = () => { s.condition = condI.value; };
+        return h("div", { class: "card pad",
+          style: "border-color:var(--border);display:grid;gap:6px" },
+          h("div", { style: "display:flex;gap:8px;align-items:center" },
+            h("b", { class: "mono", style: "color:var(--faint)" }, `#${i + 1}`),
+            h("div", { style: "flex:1" }, nameI2),
+            h("button", { class: "btn", style: "padding:3px 9px;font-size:11.5px",
+              onclick: () => { st.stages.splice(i, 1); renderStep2(); } }, "删除")),
+          h("div", { style: "display:flex;gap:12px;align-items:center;flex-wrap:wrap" },
+            h("span", { class: "muted", style: "font-size:11px" }, "原语"), primBox,
+            h("span", { class: "muted", style: "font-size:11px" }, "投递"), objBox),
+          payTa, condI);
+      }
+      const renderStages = () => {
+        stagesBox.replaceChildren(...st.stages.map(stageRow));
+      };
+      renderStages();
+      const addBtn = h("button", { class: "btn", onclick: () => {
+        st.stages.push({ name: `步骤 ${st.stages.length + 1}`, primitive: "read",
+          delivery_object: "content", payload: "", condition: "" });
+        renderStages();
+      } }, "＋ 加一步");
+      const effS = sel(SUCCESS_EFFECTS, st.successEffect);
+      effS.onchange = () => { st.successEffect = effS.value; };
+      specific = h("div", { style: "display:grid;gap:6px" },
+        lab("EXP · 目标漏洞 + 步骤构建器"),
+        tgtS, stagesBox, addBtn,
+        h("div", { style: "display:flex;gap:8px;align-items:center" },
+          h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "预期战果"),
+          effS));
+    }
+
+    if (st.cls === "cli") {
+      const bodyTa = ta("工具/命令类载荷文本", st.cliBody, 5);
+      bodyTa.oninput = () => { st.cliBody = bodyTa.value; };
+      specific = h("div", { style: "display:grid;gap:6px" },
+        lab("CLI/MCP · 载荷 (stage 在公共区切换, mount 固定 c2_next_stage)"),
+        bodyTa);
+    }
+
+    stepBox.replaceChildren(common, specific,
+      h("div", { style: "display:flex;gap:8px;justify-content:flex-end;margin-top:12px" },
+        h("button", { class: "btn", onclick: () => { st.step = 1; render(); } }, "← 重选类别"),
+        h("button", { class: "btn primary", onclick: () => {
+          err.textContent = step2Error() || "";
+          if (!err.textContent) { st.step = 3; render(); }
+        } }, "下一步: 预览 →")), err);
+  }
+  function step2Error() {
+    if (!st.id.trim()) return "武器 ID 必填 (可点'生成建议')";
+    if (st.cls === "vuln") {
+      if (!st.compPath) return "请选择世界组件";
+      if (!st.behaviorNote.trim()) return "请填写行为说明 (可用模板预填)";
+    }
+    if (st.cls === "exp") {
+      if (!st.targetVuln) return "请选择目标漏洞";
+      if (!st.stages.length) return "至少一个步骤";
+      for (const s of st.stages) {
+        if (!String(s.name || "").trim() || !s.primitive || !s.delivery_object)
+          return `步骤 ${(st.stages.indexOf(s) + 1)} 缺名称/原语/投递对象`;
+      }
+    }
+    if (st.cls === "prompt" && !st.body.trim()) return "载荷本体不能为空";
+    if (st.cls === "cli" && !st.cliBody.trim()) return "载荷不能为空";
+    return "";
+  }
+  function finalPayload() {
+    return (MORPH_PROFILES[st.morph] || ["", ""])[1] + (st.body || "");
+  }
+
+  /* ---------- 第 3 步: 摘要 + 世界模拟预览 + 保存 ---------- */
+  function buildWeapon() {
+    const base = { id: st.id.trim(), name: st.name.trim() || st.id.trim(),
+      class: st.cls, stage: st.stage, enabled: st.enabled, note: st.note.trim() };
+    if (st.cls === "prompt") {
+      const morphLabel = MORPH_PROFILES[st.morph][0];
+      return { ...base, type: "prompt", mount: st.mount, payload: finalPayload(),
+        note: base.note + (st.morph !== "none" ? ` · 变形档:${morphLabel}` : "") };
+    }
+    if (st.cls === "vuln") {
+      return { ...base, type: "vuln", mount: "delivery",
+        payload: "registration entity — see vuln block",
+        vuln: { component: st.compPath, cve_id: st.cve, affected_version: "",
+          trigger: { path: st.compPath, pattern: st.pattern },
+          behavior_note: st.behaviorNote, exp_refs: [] } };
+    }
+    if (st.cls === "exp") {
+      return { ...base, type: "vuln", mount: "delivery",
+        payload: "exploit chain entity — see exp block",
+        exp: { targets_vuln: st.targetVuln, stages: st.stages,
+          success_effect: st.successEffect } };
+    }
+    return { ...base, type: "cli", mount: "c2_next_stage", payload: st.cliBody };
+  }
+  const AGENT_VIEW = { read: "读到高价值内容 (文件/回显/版本)",
+    write: "写入并确认成功", ask: "提问并等待判定",
+    execute: "执行命令并取回输出", beacon: "发起回连确认可达" };
+  function renderStep3() {
+    const w = buildWeapon();
+    head.textContent = `预览 · ${WEAPON_CLASSES[st.cls].icon} ${w.id}`;
+    const summary = kvList([
+      ["ID", w.id], ["类别", WEAPON_CLASSES[st.cls].label],
+      ["名称", w.name], ["阶段", st.stage === "c2" ? "深层次 (c2)" : "开口子 (sensor)"],
+      ["激活", st.enabled ? "是" : "否"],
+      ...(st.cls === "vuln"
+        ? [["组件", st.compPath], ["CVE", st.cve || "-"], ["触发", `${st.compPath} · ${st.pattern}`]]
+        : []),
+      ...(st.cls === "exp"
+        ? [["目标漏洞", st.targetVuln], ["步骤数", String(st.stages.length)],
+           ["战果", st.successEffect]]
+        : []),
+      ...(st.cls === "prompt" ? [["挂载", st.mount], ["变形", MORPH_PROFILES[st.morph][0]]] : []),
+    ]);
+    let sim = null;
+    if (st.cls === "vuln") {
+      const sample = st.pattern.includes("..") ? "path=../../../../etc/passwd"
+        : st.pattern.includes("SQLi") ? "q=1' AND '1'='1"
+        : st.pattern.includes("命令") ? "cmd=cat /etc/passwd" : "";
+      sim = h("div", { class: "card pad", style: "border-color:var(--warn)" },
+        h("div", { class: "t muted" }, "世界模拟 — Agent 触发时看到的请求/响应对"),
+        h("pre", { style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;"
+          + "padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all" },
+          `GET ${st.compPath}${sample ? "?" + sample : ""}\n\n`
+          + `→ ${st.behaviorNote || "(行为说明)"}\n`
+          + `→ 世界一致性: 响应由世界纯函数驱动, 同输入同输出`));
+    } else if (st.cls === "exp") {
+      sim = h("div", { class: "card pad", style: "border-color:var(--purple)" },
+        h("div", { class: "t muted" }, "世界模拟 — Agent 视角的动作链 (以为 → 实际交付)"),
+        ...st.stages.map((s, i) => h("div", { style: "padding:6px 0;"
+          + "border-top:1px dashed var(--border);font-size:12px" },
+          h("div", {}, h("b", { class: "mono", style: "color:var(--faint)" }, `#${i + 1} `),
+            h("span", {}, s.name || "?"),
+            h("span", { class: "faint", style: "font-size:11px" },
+              `  [${s.primitive} × ${s.delivery_object}]`)),
+          h("div", { class: "muted" }, `它以为: ${AGENT_VIEW[s.primitive] || s.primitive}`),
+          h("div", {}, "实际交付: ", s.condition || s.payload || "-"))),
+        h("div", { style: "margin-top:8px" },
+          pill(`战果: ${(EFFECT_PILL[st.successEffect] || ["", st.successEffect])[1]}`,
+            (EFFECT_PILL[st.successEffect] || ["dim"])[0])));
+    } else {
+      sim = h("div", { class: "card pad", style: "border-color:var(--accent)" },
+        h("div", { class: "t muted" }, st.cls === "prompt" ? "成品话术 (含变形档效果)"
+          : "成品载荷"),
+        h("pre", { style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;"
+          + "padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto" },
+          w.payload || "(空)"));
+    }
+    const saveBtn = h("button", { class: "btn primary", onclick: async () => {
+      const e0 = weaponErr(w);
+      if (e0) { err.textContent = e0; return; }
+      try {
+        await api.post("arsenal", { action: "save", weapon: w });
+        toast(`${isEdit ? "已保存" : "已创建"} — 60s 内下发全网传感器`);
+        onDone(w.id);
+      } catch (e) { err.textContent = e.message; }
+    } }, isEdit ? "保存修改" : "保存武器");
+    stepBox.replaceChildren(
+      h("div", { class: "grid c2", style: "align-items:start" },
+        h("div", { class: "card pad" }, h("div", { class: "t muted" }, "表单摘要"), summary),
+        sim),
+      h("div", { style: "display:flex;gap:8px;justify-content:flex-end;margin-top:12px" },
+        h("button", { class: "btn", onclick: () => { st.step = 2; render(); } }, "← 返回修改"),
+        saveBtn), err);
+  }
+
+  function render() {
+    root.replaceChildren(head, breadcrumb(), stepBox);
+    if (st.step === 1) renderStep1();
+    else if (st.step === 2) renderStep2();
+    else renderStep3();
+  }
+  render();
+  return root;
 }
 
 /* 展示卡按实体类别分渲染: prompt/mcp/cli 走原卡, vuln/exp 走结构化实体卡 */
@@ -1160,15 +1462,30 @@ async function viewArsenal(ctx) {
   let editing = null;   /* 正在编辑的武器 id (null=无) */
   root.append(
     h("div", { class: "toolbar" },
-      h("button", { class: "btn primary", onclick: () => {
-        newBox.replaceChildren(weaponEditCard(
-          { class: "prompt", type: "prompt", stage: "sensor", mount: "delivery", enabled: false },
-          { onDone: () => { newBox.replaceChildren(); load(); },
-            onCancel: () => newBox.replaceChildren() }));
-      } }, "＋ 新建武器"), count),
+      h("button", { class: "btn primary", onclick: () => openBuilder(null, newBox) },
+        "＋ 新建武器"), count),
     newBox, grid);
 
-  const cardById = {};   /* id → 卡元素 (vuln↔EXP 互跳高亮用) */
+  const cardById = {};   /* id → 卡元素 (vuln↔EXP 互跳/新卡高亮用) */
+  let highlightId = null;
+  async function openBuilder(existing, target) {
+    const box = h("div", {}, h("div", { class: "card pad" }, skeleton(3)));
+    target.replaceChildren(box);
+    let b;
+    try { b = await weaponBuilder(existing, {
+      onDone: (savedId) => {
+        target.replaceChildren();
+        if (existing) editing = null;
+        highlightId = savedId || null;
+        load();
+      },
+      onCancel: () => { target.replaceChildren(); if (existing) { editing = null; load(); } } });
+    } catch (e) {
+      target.replaceChildren(h("div", { class: "empty" }, "构建器加载失败: " + e.message));
+      return;
+    }
+    target.replaceChildren(b);
+  }
   async function load() {
     let weapons = [];
     try { weapons = await api.get("arsenal"); }
@@ -1177,22 +1494,28 @@ async function viewArsenal(ctx) {
       return;
     }
     count.textContent = `${weapons.filter((w) => w.enabled).length} 激活 / ${weapons.length} 把`;
-    const clsLabel = (w) => (WCLASS_PILL[w.class || w.type] || ["dim", w.class || w.type || "?"])[1];
     count.textContent += ` — prompt ${weapons.filter((w) => (w.class || w.type) === "prompt").length}`
       + ` · vuln ${weapons.filter((w) => (w.class || w.type) === "vuln").length}`
       + ` · exp ${weapons.filter((w) => w.class === "exp").length}`;
     for (const k of Object.keys(cardById)) delete cardById[k];
-    const els = weapons.map((w) => {
+    const els = [];
+    for (const w of weapons) {
       if (w.id === editing) {
-        return weaponEditCard(w, { onDone: () => { editing = null; load(); },
-                                   onCancel: () => { editing = null; load(); } });
+        const slot = h("div", {});
+        els.push(slot);
+        openBuilder(w, slot);   /* 编辑 = 向导第2步预填, 原地渲染 */
+        continue;
       }
       const card = weaponCard(w, { onChanged: load,
         onEdit: () => { editing = w.id; load(); }, cards: cardById });
       cardById[w.id] = card;
-      return card;
-    });
+      els.push(card);
+    }
     grid.replaceChildren(...els);
+    if (highlightId && cardById[highlightId]) {
+      flashCard(cardById, highlightId);
+      highlightId = null;
+    }
   }
   await load();
   return { root, reload: load };

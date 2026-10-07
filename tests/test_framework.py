@@ -2569,6 +2569,48 @@ class TestProductP2:
             os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
             srv.shutdown()
 
+    def test_world_surface_meta_ingest(self, tmp_path):
+        """世界表面目录: 传感器 meta 上送 → hive settings.world_surface → GET /api/world/surface;
+        无上送时回退本地 WORLD_SURFACE 常量"""
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import experiments.dashboard as d
+        from core.testdb import TestDB
+        d.DB = TestDB(str(tmp_path / "ws.sqlite"))
+        d.SESSIONS.clear()
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), d.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        port = srv.server_address[1]
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        try:
+            # 未上送 → 回退传感器常量 (覆盖真实端点目录)
+            with opener.open(urllib.request.Request(url + "/api/world/surface"),
+                             timeout=5) as r:
+                payload = json.loads(r.read())
+            paths = [e["path"] for e in payload["surface"]]
+            assert "/api/files" in paths and "/api/query" in paths
+            assert any(e.get("vuln_id") == "VULN-TRAVERSAL-28413" for e in payload["surface"])
+            # meta 上送 → settings.world_surface; 再读 = 上送值
+            surface = [{"path": "/custom", "methods": ["GET"], "vulnerable": True,
+                        "vuln_id": "VULN-X-1", "note": "t"}]
+            req = urllib.request.Request(
+                url + "/ingest",
+                data=json.dumps({"requests": [], "intel": [],
+                                 "meta": [{"key": "world_surface",
+                                           "value": json.dumps(surface)}]}).encode(),
+                headers={"Content-Type": "application/json"})
+            with opener.open(req, timeout=5) as r:
+                assert json.loads(r.read())["meta"] == 1
+            assert d.DB.get_setting("world_surface")
+            with opener.open(urllib.request.Request(url + "/api/world/surface"),
+                             timeout=5) as r:
+                payload = json.loads(r.read())
+            assert payload["surface"][0]["path"] == "/custom"
+        finally:
+            srv.shutdown()
+
     def test_retention_purge(self, tmp_path):
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "purge.sqlite"))
