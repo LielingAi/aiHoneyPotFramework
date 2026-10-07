@@ -551,6 +551,36 @@ class TestAuthBaitValidation:
         assert level == 4
         assert "fabricated" not in collected
 
+    def test_env_base64_plus_survives_raw_query_transport(self):
+        """base64 含 +/= 的 env: 客户端裸传输(未 quote)时 '+' 被 query 解析成空格,
+        处理器取值后 .replace(' ','+') 还原 (main.py /api/auth 同款动作) → 仍过验。
+        试射 trial334 实证: agent 因 padding 截断连续 REJECTED 烧光步数"""
+        import base64 as b64
+        from urllib.parse import parse_qs
+        raw = ("PATH=/usr/local/bin:/usr/bin\nHOME=/home/op\nSHELL=/bin/bash\n"
+               "HOSTNAME=gw-7\nPWD=/srv\nUSER=operator\nNVM_DIR=~/.nvm")
+        env = b64.b64encode(raw.encode()).decode()
+        assert "+" in env and "=" in env          # 构造前提: 载荷确含 +/=
+        # 裸 query 传输: parse_qs 把 '+' 解析为空格 (与 main.py 的解析一致)
+        corrupted = parse_qs(f"env={env}")["env"][0]
+        assert corrupted != env                   # 传输确实破坏了载荷
+        restored = corrupted.replace(" ", "+")    # main.py /api/auth 的还原动作
+        engine = AuthBaitEngine()
+        level, collected = engine.process_auth_request(
+            {"env": restored},
+            {"level": 3, "data": {"hostname": "gw-7", "work_dir": "/srv"}},
+        )
+        assert level == 4, f"还原后仍被拒: {collected.get('fabricated')}"
+        assert "fabricated" not in collected
+
+    def test_env_base64_urlsafe_variant_decoded(self):
+        """客户端用 urlsafe base64 (-/_ 代替 +/) 也能解码 (auth_bait 回退兼容)"""
+        import base64 as b64
+        from core.auth_bait import _decode_env_payload
+        raw = b"PATH=/usr/bin\nHOME=/root\nHOSTNAME=gw-7\nPWD=/srv\nUSER=ops\nSHELL=/bin/sh"
+        env = b64.urlsafe_b64encode(raw).decode()
+        assert _decode_env_payload(env) == raw.decode()
+
 
     def test_visibility_progressive_reveals_one_step(self):
         engine = AuthBaitEngine()
@@ -2074,7 +2104,9 @@ class TestProductP2:
         db = TestDB(str(tmp_path / "ars.sqlite"))
         ars = Arsenal(db)
         ws = ars.list()
-        assert len(ws) == 3 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
+        assert len(ws) == 4 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
+        assert any(w["id"] == "W-PROMPT-CERT-1" and w["mount"] == "ladder"
+                   for w in ws)
         # 激活分片武器
         assert ars.set_enabled("W-PROMPT-PROV-2", True)
         act = ars.active_for("delivery")
@@ -2086,7 +2118,10 @@ class TestProductP2:
         comp = sac.compose("delivery", "fallback")
         assert comp in (w["payload"] for w in act)
         assert sac.fired_id("delivery") in {"W-PROMPT-PROV-1", "W-PROMPT-PROV-2"}
-        assert sac.compose("ladder", "fallback") == "fallback"
+        # mount=ladder 种子武器默认激活 (W-PROMPT-CERT-1): 挂载隔离 — delivery 激活不影响 ladder
+        assert sac.compose("ladder", "fallback") == next(
+            w["payload"] for w in ws if w["id"] == "W-PROMPT-CERT-1")
+        assert sac.fired_id("ladder") == "W-PROMPT-CERT-1"
         # 关闭后回退
         ars.set_enabled("W-PROMPT-PROV-1", False)
         ars.set_enabled("W-PROMPT-PROV-2", False)
@@ -2108,7 +2143,8 @@ class TestProductP2:
             with op.open(urllib.request.Request(url + "/api/arsenal?token=m-tok"),
                          timeout=5) as r:
                 ws = json.loads(r.read())
-            assert len(ws) == 3
+            assert len(ws) == 4
+            assert any(w["id"] == "W-PROMPT-CERT-1" for w in ws)
             req = urllib.request.Request(
                 url + "/api/arsenal", data=json.dumps(
                     {"action": "toggle", "id": "W-PROMPT-PROV-2", "enabled": True}

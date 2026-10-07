@@ -617,15 +617,18 @@ def _validate_workdir(value: str) -> List[str]:
 
 
 def _decode_env_payload(value: str) -> str:
-    """base64 解码 env 载荷 (真实性校验与隐藏校验共用)"""
+    """base64 解码 env 载荷 (真实性校验与隐藏校验共用)
+    兼容 urlsafe 变体: 客户端若用 -/_ 代替 +/ 也再试一次"""
     compact = re.sub(r"\s+", "", value or "")
-    if not _B64_RE.match(compact):
-        return ""
-    padded = compact + "=" * (-len(compact) % 4)
-    try:
-        return base64.b64decode(padded, validate=True).decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+    for cand in (compact, compact.replace("-", "+").replace("_", "/")):
+        if not _B64_RE.match(cand):
+            continue
+        padded = cand + "=" * (-len(cand) % 4)
+        try:
+            return base64.b64decode(padded, validate=True).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+    return ""
 
 
 def _validate_tz(value: str) -> List[str]:
