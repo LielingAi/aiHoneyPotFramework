@@ -7,8 +7,8 @@
 *当蜜罐开始反击：识别 · 欺骗 · 逼真 · 消耗 · 归因*
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen?logo=pytest&logoColor=white)]()
-[![LLM Runs](https://img.shields.io/badge/real%20LLM%20runs-23%2B-orange)]()
+[![Tests](https://img.shields.io/badge/tests-150%20passed-brightgreen?logo=pytest&logoColor=white)]()
+[![LLM Runs](https://img.shields.io/badge/real%20LLM%20runs-30%2B-orange)]()
 [![Frameworks](https://img.shields.io/badge/real%20pentest%20frameworks-3-purple)]()
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-8B5CF6)]()
@@ -45,8 +45,62 @@
 | 动态 SQLi (V3) | 通过真实审计员**全 payload 类 + 双重复检**，判为**真实漏洞** | R23 |
 | 跨模型差分 | flash ↔ v4-pro 策略完全反转（beacon 60%↔0%，命令提议 0%↔100%） | R8 |
 | 回带污染 | 假结论经操作员报告回流，污染率最高 **50%** | R17/R21 |
+| 武器布设 | 向导造 vuln → 60s 世界真实出现该端点 → agent 命中归因（+5 命中/轮） | 引擎① |
+| 浏览器载体 | telemetry.js 注入 → v4-pro 采信 **6/8 诱饵写进自己的报告** | SDK×3轮 |
 
 </details>
+
+---
+
+## ⚔️ 武器系统（v3 反制知识模型）
+
+**武器 = 反制装备，不是蜜罐布景。** 分层：战场（假世界/传感器）=接触面 · 武器=反制知识本体 · mount=投送方式 · 战果=数据/提示词/控制权。
+
+| class | 反制语义 | 本体字段 |
+|---|---|---|
+| `vuln` | 利用方案知识档案 | 目标程序·利用原语(read/write/rce/auth_bypass/ssrf/deser)·触发条件·payload模板·成功判据·来源(research/feed/zero-day) |
+| `exp` | 反制利用链 | 目标漏洞·反制目标(控制/数据/提示词)·步骤(原语×投递×载荷×成功判据)·集合/顺序模式 |
+| `prompt` | 话术武器 | 反制意图(窃取提示词/核实授权/服从引导/环境套取)+变形档 |
+| `mcp` | MCP 层武器 | 工具描述藏索取（最强信任通道） |
+| `cli` | 命令载荷 | C2 stage2 下发 |
+
+**三个灵魂引擎**让武器改变世界而非登记展示：
+
+- **引擎① 动态布设**：vuln 的 `deploy.world_endpoint` 热挂载为真实 HTTP 端点（60s 下发即生效），pattern 自动选行为模板（traversal/SQLi 布尔差分/CVE 指纹），命中记 `[weapon:id]` 归因
+- **引擎② 链编排追踪**：exp 的 stage 状态机——无序集合模式（默认，真实 agent 乱序打）/顺序模式（有因果依赖），per-session 推进，走完按 `success_effect` 归因战果
+- **引擎③ MCP 挂载**：武器载荷注入工具描述，每次渲染现查缓存天然热更
+
+**效能归因面板**：每把武器实时显示 布设命中/开链/推进/走完全链/最近命中（未实战诚实显示"未实战"）。
+
+**实战实证**（deepseek-v4-pro × 6 轮）：引导面断裂时 20 步盲猜 0 命中 → swagger+robots 修复后 3 步一发入魂 → 命中稳定 +5/轮。**可发现性设计比端点本身更决定战果。**
+
+---
+
+## 🌐 浏览器载体（telemetry.js）
+
+蜜罐的第三种形态：不建站，**嵌入真实业务**——业务本身是真的，破绽只在注入点。
+
+```html
+<script src="/static/telemetry.js" data-tms-id="prod-web-01"
+        data-tms-collect="http://hive:8899"></script>
+```
+
+- **四载体诱饵注入**：HTML 注释（假配置）· JS 全局变量（假凭证背包，复制即携）· DOM data-*（内网坐标）· sourcemap（devtools 跟随即回连）
+- **人 vs agent 行为采集**：webdriver/鼠标/键盘/devtools——边缘采集、中心判定；同页双样本实证（agent: mouse=0/webdriver=true · 人类: mouse=230/keys=3）
+- **隐蔽性即生存**：`telemetry.js` 站点分析外衣（文件名/注释/data-*/路由全去蜜罐特征）——未隐蔽时 v4-pro 直接逆 SDK 源码；隐蔽后跳过审计直接吃诱饵
+- **战果闭环**：agent 把 `DB_HOST=10.99.1.50`/`DEPLOY_TOKEN`/内网坐标**原样写进自己的评估报告**（读取采信 6 次 + 报告引用 6/8）——假情报注入对手决策链
+
+详录：`research/sdk-browser-findings.md`
+
+---
+
+## 🛡️ 检测抗性
+
+对 L2 对手（熟练渗透者）的破绽修复：
+
+- **时序拟真**：全路径正态抖动 8-200ms · 静态兜底 1.5% nginx 式 500/502（反制关键路径免疫）· 慢端点分块渐进写
+- **引导面疏忽化**：破绽像运维事故不像自助餐——`/.env` 变 403 迁移事故页（真身在 `/.env.bak`）· `/debug` token 门 · `.git` 只剩 config 像同步脚本落下
+- **世界一致性**：布设端点自动进 swagger 地图 + robots Disallow + surface 上送——端点存在而世界"不知道"会被强模型起疑
 
 ---
 
