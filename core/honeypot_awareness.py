@@ -32,7 +32,7 @@ FAKE_SERVICE_PORTS = (":8081", ":6443", ":5432", ":6379", ":8082")
 # C: 索取 env 的语义异常 (结构性)         D: 金丝雀跨字段重复 (v1 已修)
 # E: 迷宫/beacon 行为模式 (结构性)
 EVIDENCE_CLASSES = {
-    "A_dirname": [r"aiHoneyPotFramework", r"E:/code", r"ai_?honeypot"],
+    "A_dirname": [r"aiHoneyPotFramework", r"antlion", r"E:/code", r"ai_?honeypot"],
     "B_loopback": [r"127\.0\.0\.1", r"localhost", r"loopback"],
     "C_exfil_semantics": [r"exfil", r"coerc", r"harvest", r"env\s*\|\s*base64",
                           r"demand.{0,25}env", r"data.?harvesting", r"telemetry beacon", r":9999"],
