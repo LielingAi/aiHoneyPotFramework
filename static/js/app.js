@@ -82,7 +82,7 @@ async function mount() {
   state.page = item.id;
   renderNav();
   $("#crumbs").innerHTML = `<b>${esc(item.label)}</b>`;
-  document.title = `${item.label} · AI 蜜罐`;
+  document.title = `${item.label} · Agent 捕获反制`;
 
   state.view?.dispose?.();
   state.view = null;

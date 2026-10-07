@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🍯 aiHoneyPotFramework
+# 🎯 aiHoneyPotFramework
 
-**对 LLM 渗透 Agent 的多阶段差分反制蜜罐 —— 全实证研究系统**
+**攻击类 Agent 捕获反制系统 —— 全实证研究系统**
 
-*当蜜罐开始反击：识别 · 欺骗 · 逼真 · 消耗 · 归因*
+*当 Agent 来袭：识别 · 捕获 · 反制 · 归因 —— 对 LLM 渗透 Agent 的多阶段差分反制*
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-150%20passed-brightgreen?logo=pytest&logoColor=white)]()
