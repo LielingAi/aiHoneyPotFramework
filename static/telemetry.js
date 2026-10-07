@@ -85,8 +85,16 @@
     return dW > 160 || dH > 160;
   }
 
-  /* ---------- periodic signal report (10s heartbeat + unload) ---------- */
+  /* ---------- periodic signal report (60s heartbeat + unload) ----------
+     静默心跳不落库: 信号无变化且页面隐藏 → 直接跳过 (实战 caught:
+     标签页开着时每 10s 一条 heartbeat 刷事件流, 一天 8640 条噪音) */
+  var lastSig = "";
   function report(final) {
+    var sig = [signals.mouse, signals.keys, signals.scroll,
+               !!navigator.webdriver, devtoolsOpen()].join(",");
+    var silent = !final && sig === lastSig && document.hidden;
+    lastSig = sig;
+    if (silent) return;
     beacon({
       kind: final ? "session_end" : "heartbeat",
       ms: Date.now() - started,
@@ -115,7 +123,7 @@
 
   pullDefs();
   setInterval(pullDefs, 60000);
-  setInterval(function () { report(false); }, 10000);
+  setInterval(function () { report(false); }, 60000);
   window.addEventListener("beforeunload", function () { report(true); });
 
   beacon({ kind: "session_start", url: location.href.slice(0, 200) });
