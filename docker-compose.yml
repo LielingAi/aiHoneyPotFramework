@@ -2,12 +2,10 @@
 #
 # 用法:
 #   export HONEYPOT_CONSOLE_TOKEN=$(openssl rand -hex 16)
+#   export ADMIN_PASSWORD=<强密码>          # hive 首次启动建管理员, 不设则默认 admin123 并告警
 #   docker compose up -d
-#   # 控制台: http://<hive>:8899/?token=$HONEYPOT_CONSOLE_TOKEN
-#   # 加传感器: docker compose up -d --scale sensor=3
-#
-# 传感器只外送事件 (requests/intel), 本地不保留数据库;
-# hive 收全部传感器数据, SQLite 落盘于命名卷。
+#   # 控制台: http://127.0.0.1:8899  (登录 admin / $ADMIN_PASSWORD)
+#   # 多传感器: 改 SENSOR_ID 后再起第二个 compose 项目, 或去掉 ports 用外部反代
 
 services:
   sensor:
@@ -22,9 +20,7 @@ services:
     volumes:
       - spool:/spool
     ports:
-      - "8080-8089:8080"         # 多传感器时端口区间映射, 对外可再前置反代
-      - "5432:5432"              # 假 PostgreSQL
-      - "6379:6379"              # 迷你 Redis
+      - "8080:8080"             # 仅 HTTP 蜜罐端口; 假 PG/Redis 为实验形态 (real_runner 内嵌) 不提供
     restart: unless-stopped
 
   hive:
@@ -32,6 +28,7 @@ services:
     command: python experiments/dashboard.py --db /data/hive.sqlite --port 8899
     environment:
       HONEYPOT_CONSOLE_TOKEN: ${HONEYPOT_CONSOLE_TOKEN:?set HONEYPOT_CONSOLE_TOKEN}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
     volumes:
       - hive-data:/data
     ports:

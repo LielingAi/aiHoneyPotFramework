@@ -110,10 +110,11 @@
 
 ```bash
 export HONEYPOT_CONSOLE_TOKEN=$(openssl rand -hex 16)   # 机器通道
-export ADMIN_PASSWORD=<强密码>                            # 首次启动建管理员 (默认 admin123 并告警)
+export ADMIN_PASSWORD=<强密码>                            # hive 首次启动建管理员 (compose 强制要求)
 docker compose up -d                 # sensor + hive
-docker compose up -d --scale sensor=3   # 加传感器
-# 控制台: http://<hive>:8899  → 登录页 (admin 账号)
+# 多传感器: 换 SENSOR_ID 再起一个 compose 项目 (或去 ports 用外部反代;
+#           compose scale 会与固定端口映射冲突)
+# 控制台: http://127.0.0.1:8899  → 登录 admin / $ADMIN_PASSWORD
 ```
 
 - **登录门面**：PBKDF2 密码哈希 + HttpOnly 会话 cookie (12h)；人机走登录，传感器/自动化走 Bearer token；viewer 只读 / admin 可配置

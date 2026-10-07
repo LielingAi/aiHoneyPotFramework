@@ -7,8 +7,9 @@ COPY . .
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8
 
-# 蜜罐默认端口: HTTP 8080 / 假 PG 5432 / Redis 6379 / SSH 2222 / 云元数据 80(可选)
-# 控制台 (hive): 8899
-EXPOSE 8080 5432 6379 8899
+# 传感器形态 (main.py --server): HTTP 蜜罐 8080 (+C2 9999)
+# hive 形态 (experiments/dashboard.py): 控制台 8899
+# 假 PostgreSQL/Redis 仅实验形态 (experiments/real_runner 内嵌) 提供, 生产容器不起
+EXPOSE 8080 8899
 
 CMD ["python", "main.py", "--server", "--port", "8080"]
