@@ -856,24 +856,29 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static(path)
             return
         if parsed.path.startswith("/api/") and not parsed.path.startswith("/api/sdk/") \
+                and not parsed.path.startswith("/api/telemetry/") \
                 and not self._authorized(qs):
             self._send(401, b'{"error":"unauthorized"}', "application/json")
             return
-        # ---- SDK 通道 (匿名放行 — 业务站访客未登录, beacon/config 不能要认证) ----
-        # hp-sdk.js 载体: 嵌入真实业务的前端蜜罐, 与传感器平级共享 hive 全链
-        if parsed.path == "/api/sdk/config":
+        # ---- SDK/Telemetry 通道 (匿名放行 — 业务站访客未登录, beacon 不能要认证) ----
+        # 双路由: /api/sdk/* (内部语义) 与 /api/telemetry/* (对外无辜名 —
+        # SDK 文件名与路径是检测向量, 实战 caught: agent 直接 fetch hp-sdk.js 逆源码)
+        _sdk_paths = {"/api/sdk/config": "cfg", "/api/telemetry/cfg": "cfg",
+                      "/api/sdk/beacon": "b", "/api/telemetry/b": "b"}
+        if parsed.path in _sdk_paths and _sdk_paths[parsed.path] == "cfg":
             from core.arsenal import Arsenal
             weapons = [w for w in Arsenal(DB).list()
                        if w.get("enabled") and w.get("mount") == "js_bait"
                        and w.get("stage") == "sensor"]
-            self._send(200, json.dumps({"sensor": qs.get("sensor", [""])[0],
+            self._send(200, json.dumps({"sensor": qs.get("sensor", [""])[0]
+                                        or qs.get("id", [""])[0],
                                         "weapons": weapons},
                                        ensure_ascii=False).encode(), "application/json")
             return
-        if parsed.path == "/api/sdk/beacon":
-            sensor = qs.get("sensor", ["unknown"])[0][:40]
-            session = qs.get("session", ["anon"])[0][:60]
-            body = qs.get("body", [""])[0][:1500]
+        if parsed.path in _sdk_paths and _sdk_paths[parsed.path] == "b":
+            sensor = (qs.get("sensor", [""])[0] or qs.get("id", ["unknown"])[0])[:40]
+            session = (qs.get("session", [""])[0] or qs.get("s", ["anon"])[0])[:60]
+            body = (qs.get("body", [""])[0] or qs.get("p", [""])[0])[:1500]
             kind = "sdk"
             try:
                 kind = (json.loads(body) or {}).get("kind", "sdk")

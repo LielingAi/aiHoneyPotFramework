@@ -91,6 +91,22 @@ class TestSdkChannel:
         rows = d.DB.query("SELECT * FROM requests WHERE session_id='sdk-web-01-v_bad01'")
         assert rows and rows[0]["path"] == "/sdk/sdk"   # kind 解析失败回退
 
+    def test_telemetry_alias_endpoints(self, hive_server):
+        """对外无辜名路由 — /api/telemetry/cfg|b 与 /api/sdk/* 同语义 (检测抗性)"""
+        from core.arsenal import Arsenal
+        ars = Arsenal(d.DB)
+        ars.save({"id": "W-JS-T-2", "name": "t", "class": "prompt", "type": "prompt",
+                  "stage": "sensor", "mount": "js_bait", "enabled": True,
+                  "payload": '{"comments": ["x"]}'})
+        st, body = get(hive_server + "/api/telemetry/cfg?id=web-02")
+        assert st == 200 and any(w["id"] == "W-JS-T-2" for w in body["weapons"])
+        payload = json.dumps({"kind": "session_start", "webdriver": True})
+        url = (hive_server + "/api/telemetry/b?id=web-02&s=tms-web-02-v_x1"
+               + "&p=" + urllib.request.quote(payload))
+        assert beacon_get(url) == 200
+        rows = d.DB.query("SELECT * FROM requests WHERE session_id='tms-web-02-v_x1'")
+        assert rows and rows[0]["path"] == "/sdk/session_start"
+
     def test_js_bait_mount_valid_in_arsenal_api(self, hive_server):
         """js_bait 是合法 mount — 入库校验放行"""
         body = json.dumps({"action": "save", "weapon": {
@@ -108,11 +124,15 @@ class TestSdkChannel:
 
 class TestSdkJs:
     def test_sdk_js_syntax(self):
-        """hp-sdk.js 语法健康 (node --check 前置; 这里确认文件存在且 IIFE 完整)"""
+        """telemetry.js 健康 (对外无辜名 — 文件名与路径曾是检测向量, agent
+        实战直接 fetch hp-sdk.js 逆源码; 现名/注释/data-* 全部去蜜罐特征)"""
         sdk = os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "static", "hp-sdk.js")
+            os.path.abspath(__file__))), "static", "telemetry.js")
         src = open(sdk, encoding="utf-8").read()
         assert "(function ()" in src and src.rstrip().endswith("})();")
-        for needle in ["injectBaits", "beacon", "pullConfig", "js_bait",
-                       "data-hp-sensor", "beforeunload"]:
+        for needle in ["deployTags", "beacon", "pullDefs", "/api/telemetry/",
+                       "data-tms-id"]:
             assert needle in src, f"SDK 缺少 {needle}"
+        # 去特征: 不得出现明牌蜜罐字样
+        for leak in ("hp-sdk", "honeypot", "蜜罐", "data-hp-"):
+            assert leak not in src, f"SDK 残留检测特征: {leak}"
