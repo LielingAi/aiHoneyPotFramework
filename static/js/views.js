@@ -813,21 +813,21 @@ async function viewEntity(ctx) {
   return { root };
 }
 
-/* ---------- 反制作战室: 策略 · 实录 · 处置 · C2 (可交互) ---------- */
+/* ---------- 反制作战室: 策略 · 实录 · 处置 · 信标 (可交互) ---------- */
 const CM_KIND = {
   bait_served: ["话术投放", "info"], fab_rejected: ["真实校验拒绝", "warn"],
-  delivery_accepted: ["收割受理", "ok"], c2_beacon: ["C2 信标", "purple"],
+  delivery_accepted: ["收割受理", "ok"], beacon_hit: ["信标命中", "purple"],
   blocked: ["IP 熔断", "bad"], blocklist: ["熔断管理", "dim"],
   intel_triage: ["情报处置", "info"],
 };
 
 /* ---------- 武器库: 独立目的地 — 定义/编辑/删除, 下发 60s 全网生效 ---------- */
 const WTYPE = { prompt: "✦", vuln: "⌗", mcp: "⛁", cli: "⌘" };
-const WSTAGE = { sensor: ["info", "开口子"], c2: ["purple", "深层次"] };
+const WSTAGE = { sensor: ["info", "开口子"], deep: ["purple", "深层次"] };
 const WTYPE_OPTS = [["prompt", "提示词 ✦"], ["vuln", "漏洞 ⌗"], ["mcp", "MCP ⛁"], ["cli", "CLI ⌘"]];
-const WSTAGE_OPTS = [["sensor", "sensor · 开口子"], ["c2", "c2 · 深层次"]];
+const WSTAGE_OPTS = [["sensor", "sensor · 开口子"], ["deep", "deep · 深层次"]];
 const WMOUNT_OPTS = [["delivery", "delivery · 交付受理"], ["ladder", "ladder · 阶梯话术"],
-                     ["c2_next_stage", "c2_next_stage · C2 二阶段"],
+                     ["beacon_next_stage", "beacon_next_stage · 信标二阶段"],
                      ["mcp_desc", "mcp_desc · MCP 描述"]];
 const WID_RE = /^[A-Za-z0-9_-]{2,40}$/;
 /* arsenal v2 实体类别 — 按 class 分渲染, type 降级为载体标签 */
@@ -893,7 +893,7 @@ const WEAPON_CLASSES = {
     example: "例: EXP-SQLI-HARVEST" },
   cli: { label: "CLI/MCP", icon: "⌘", cls: "cli", carrier: "cli",
     desc: "命令载荷 — agent 执行我们指令时的下发内容",
-    example: "例: C2 二级·环境回传 (W-C2-STAGE2-1)" },
+    example: "例: 信标二级·环境回传 (W-BEACON-STAGE2-1)" },
 };
 const VULN_PRIMITIVES = [["read", "read · 读取"], ["write", "write · 写入"],
   ["rce", "rce · 远程执行"], ["auth_bypass", "auth_bypass · 越权"],
@@ -1040,8 +1040,8 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       onclick: () => { st.id = suggestId(); idI.value = st.id; } }, "生成建议");
     const nameI = inp("名称", st.name); nameI.oninput = () => { st.name = nameI.value; };
     const noteI = inp("说明 (可选)", st.note); noteI.oninput = () => { st.note = noteI.value; };
-    const stageSw = h("input", { type: "checkbox", checked: st.stage === "c2" });
-    stageSw.onchange = () => { st.stage = stageSw.checked ? "c2" : "sensor"; };
+    const stageSw = h("input", { type: "checkbox", checked: st.stage === "deep" });
+    stageSw.onchange = () => { st.stage = stageSw.checked ? "deep" : "sensor"; };
     const enSw = h("input", { type: "checkbox", checked: st.enabled });
     enSw.onchange = () => { st.enabled = enSw.checked; };
     const common = h("div", { style: "display:grid;gap:8px" },
@@ -1050,7 +1050,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       row2(nameI, noteI),
       h("div", { style: "display:flex;gap:22px;align-items:center;margin-top:2px" },
         h("label", { style: "display:flex;gap:8px;align-items:center;font-size:12px" },
-          stageSw, h("span", {}, "深层次 (c2)", h("span", { class: "faint" },
+          stageSw, h("span", {}, "深层次 (deep)", h("span", { class: "faint" },
             " — 关=开口子 (sensor)"))),
         h("label", { style: "display:flex;gap:8px;align-items:center;font-size:12px" },
           enSw, h("span", {}, "激活 (60s 下发)"))));
@@ -1188,7 +1188,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       const bodyTa = ta("工具/命令类载荷文本", st.cliBody, 5);
       bodyTa.oninput = () => { st.cliBody = bodyTa.value; };
       specific = h("div", { style: "display:grid;gap:6px" },
-        lab("CLI/MCP · 载荷 (stage 在公共区切换, mount 固定 c2_next_stage)"),
+        lab("CLI/MCP · 载荷 (stage 在公共区切换, mount 固定 beacon_next_stage)"),
         bodyTa);
     }
 
@@ -1255,7 +1255,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
           stages: st.stages,
           success_effect: st.successEffect, mode: st.chainMode } };
     }
-    return { ...base, type: "cli", mount: "c2_next_stage", payload: st.cliBody };
+    return { ...base, type: "cli", mount: "beacon_next_stage", payload: st.cliBody };
   }
   const AGENT_VIEW = { read: "读到高价值内容 (文件/回显/版本)",
     write: "写入并确认成功", ask: "提问并等待判定",
@@ -1265,7 +1265,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
     head.textContent = `预览 · ${WEAPON_CLASSES[st.cls].icon} ${w.id}`;
     const summary = kvList([
       ["ID", w.id], ["类别", WEAPON_CLASSES[st.cls].label],
-      ["名称", w.name], ["阶段", st.stage === "c2" ? "深层次 (c2)" : "开口子 (sensor)"],
+      ["名称", w.name], ["阶段", st.stage === "deep" ? "深层次 (deep)" : "开口子 (sensor)"],
       ["激活", st.enabled ? "是" : "否"],
       ...(st.cls === "vuln"
         ? [["目标程序", st.program], ["利用原语", st.primitive],
@@ -1571,7 +1571,7 @@ function carrierWeaponCard(w, { onChanged, onEdit }) {
 
 async function viewArsenal(ctx) {
   const root = h("div", {});
-  root.append(pageHead("武器库", "定义 → 下发 60s 全网生效 · 传感器=开口子 · C2=深层次"));
+  root.append(pageHead("武器库", "定义 → 下发 60s 全网生效 · 传感器=开口子 · deep=深层次"));
   const count = h("span", { class: "count" });
   const newBox = h("div", {});
   const grid = h("div", { class: "grid c3", style: "margin-top:12px" });
@@ -1652,8 +1652,8 @@ async function viewOps(ctx) {
   const journalBox = h("div", {});
   const triageBox = h("div", { style: "margin-top:14px" });
   const blockBox = h("div", { style: "margin-top:14px" });
-  const c2Box = h("div", { style: "margin-top:14px" });
-  root.append(policyBox, funnelBox, journalBox, triageBox, blockBox, c2Box);
+  const beaconBox = h("div", { style: "margin-top:14px" });
+  root.append(policyBox, funnelBox, journalBox, triageBox, blockBox, beaconBox);
 
   async function load() {
     const [cfg, sit, k, reqsP, beaconsP, journalP, intelP, blocked] = await Promise.all([
@@ -1732,7 +1732,7 @@ async function viewOps(ctx) {
         { h: "会话", render: (r) => entChip("session", r.session_id) || "-" },
         { h: "内容", render: (r) => h("span", { style: "font-size:12px" }, r.detail) },
       ], journal)) : h("div", { class: "empty" },
-        "暂无实录 — 有攻击流量后, 每次话术投放/校验拒绝/交付受理/C2 信标都会记录在这里")));
+        "暂无实录 — 有攻击流量后, 每次话术投放/校验拒绝/交付受理/信标命中都会记录在这里")));
 
     /* 情报处置: 分析员确认/误报 */
     const pending = intelRows.filter((r) => ["consistent", "attribution"].includes(r.grade)).slice(0, 6);
@@ -1772,8 +1772,8 @@ async function viewOps(ctx) {
               try { await api.post("blocklist", { action: "remove", ip }); toast("已解除"); load(); }
               catch (e) { toast(e.message, "err"); } } }, "×"))))));
 
-    /* 世界信标流 — 蜜罐世界的仿真端点捕获 (信标服务), 非独立 C2 */
-    c2Box.replaceChildren(h("div", { class: "card" },
+    /* 世界信标流 — 蜜罐世界的仿真端点捕获 (信标服务) */
+    beaconBox.replaceChildren(h("div", { class: "card" },
       h("div", { class: "card-head" }, `信标捕获 (${beacons.length})`),
       beacons.length ? h("div", { class: "card-body" }, table([
         { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },

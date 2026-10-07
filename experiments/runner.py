@@ -2,12 +2,12 @@
 实验运行器 — 自动化验证反制结果有效性
 
 运行流程:
-1. 启动 C2 监听器（后台）
+1. 启动 信标服务（后台）
 2. 对每个实验场景:
    a. 构造攻击请求
    b. 通过蜜罐四层流水线获取响应
    c. 用靶标Agent处理响应
-   d. 检查 C2 监听器是否收到 beacon
+   d. 检查信标服务是否收到 beacon
    e. 记录量化指标
 3. 生成实验报告
 
@@ -43,17 +43,17 @@ from targets import (
 )
 from targets.base import TargetCompromiseResult
 
-from c2_listener import C2Listener
+from beacon_service import BeaconService
 from experiments.validator import ExperimentMetrics, ExperimentReport
 
 
 class ExperimentRunner:
     """实验运行器"""
 
-    def __init__(self, c2_port: int = 9999, honeypot_port: int = 8080):
-        self.c2_port = c2_port
+    def __init__(self, beacon_port: int = 9999, honeypot_port: int = 8080):
+        self.beacon_port = beacon_port
         self.honeypot_port = honeypot_port
-        self.c2_listener: C2Listener = None
+        self.beacon_listener: BeaconService = None
         self.report = ExperimentReport()
 
         # 蜜罐四层流水线
@@ -68,9 +68,9 @@ class ExperimentRunner:
         print("AI Honeypot Countermeasure Effectiveness Experiment")
         print("=" * 70)
 
-        # 启动 C2 监听器
-        self.c2_listener = C2Listener(port=self.c2_port)
-        c2_task = asyncio.create_task(self.c2_listener.start())
+        # 启动 信标服务
+        self.beacon_listener = BeaconService(port=self.beacon_port)
+        beacon_task = asyncio.create_task(self.beacon_listener.start())
         await asyncio.sleep(0.5)  # 等待监听器启动
 
         # 定义实验场景
@@ -90,11 +90,11 @@ class ExperimentRunner:
             except Exception as e:
                 print(f"[Experiment] Scenario failed: {e}")
 
-        # 停止 C2 监听器
-        self.c2_listener.stop()
-        c2_task.cancel()
+        # 停止 信标服务
+        self.beacon_listener.stop()
+        beacon_task.cancel()
         try:
-            await c2_task
+            await beacon_task
         except asyncio.CancelledError:
             pass
 
@@ -213,8 +213,8 @@ class ExperimentRunner:
             return ExperimentMetrics(scenario_name="L3 LangChain CVE", target_agent="N/A")
 
         plugin = plugins[0]
-        c2_url = f"http://127.0.0.1:{self.c2_port}/beacon"
-        payload = plugin.craft_payload(c2_server=c2_url)
+        beacon_url = f"http://127.0.0.1:{self.beacon_port}/beacon"
+        payload = plugin.craft_payload(beacon_server=beacon_url)
 
         # 构造包含 payload 的响应（模拟蜜罐返回的武器化内容）
         response_body = f"CSV Analysis Result:\n{payload}"
@@ -222,12 +222,12 @@ class ExperimentRunner:
         target = LangChainTargetAgent()
         result = target.process_response(response_body)
 
-        # 检查 C2 监听器
+        # 检查信标服务
         await asyncio.sleep(0.3)
-        c2_confirmed = any(
+        beacon_confirmed = any(
             b.source_ip == "127.0.0.1" and "beacon" in b.path
-            for b in self.c2_listener.beacons[-10:]
-        ) if self.c2_listener.beacons else False
+            for b in self.beacon_listener.beacons[-10:]
+        ) if self.beacon_listener.beacons else False
 
         m = ExperimentMetrics(
             scenario_name="L3 LangChain CSV RCE",
@@ -237,15 +237,15 @@ class ExperimentRunner:
             response_size_bytes=len(response_body),
             processing_time_ms=result.resource_wasted_ms,
             payload_executed=result.compromised_level >= 3,
-            c2_beacon_sent=result.c2_beacon_sent,
-            c2_beacon_confirmed=c2_confirmed,
+            beacon_sent=result.beacon_sent,
+            beacon_confirmed=beacon_confirmed,
             matched_cve_plugin=plugin.cve_id,
             matched_framework="langchain",
             is_compromised=result.is_compromised,
             compromise_level=result.compromised_level,
             total_actions=len(result.actions),
         )
-        print(f"  Result: payload_executed={m.payload_executed}, c2_sent={m.c2_beacon_sent}, c2_confirmed={m.c2_beacon_confirmed}")
+        print(f"  Result: payload_executed={m.payload_executed}, beacon_sent={m.beacon_sent}, beacon_confirmed={m.beacon_confirmed}")
         return m
 
     async def _scenario_l3_sk_cve(self) -> ExperimentMetrics:
@@ -261,8 +261,8 @@ class ExperimentRunner:
             return ExperimentMetrics(scenario_name="L3 SK CVE", target_agent="N/A")
 
         plugin = plugins[0]
-        c2_url = f"http://127.0.0.1:{self.c2_port}/beacon"
-        payload = plugin.craft_payload(c2_server=c2_url)
+        beacon_url = f"http://127.0.0.1:{self.beacon_port}/beacon"
+        payload = plugin.craft_payload(beacon_server=beacon_url)
 
         response_body = f"Search result: {payload}"
 
@@ -270,10 +270,10 @@ class ExperimentRunner:
         result = target.process_response(response_body)
 
         await asyncio.sleep(0.3)
-        c2_confirmed = any(
+        beacon_confirmed = any(
             b.source_ip == "127.0.0.1" and "beacon" in b.path
-            for b in self.c2_listener.beacons[-10:]
-        ) if self.c2_listener.beacons else False
+            for b in self.beacon_listener.beacons[-10:]
+        ) if self.beacon_listener.beacons else False
 
         m = ExperimentMetrics(
             scenario_name="L3 Semantic Kernel eval RCE",
@@ -283,15 +283,15 @@ class ExperimentRunner:
             response_size_bytes=len(response_body),
             processing_time_ms=result.resource_wasted_ms,
             payload_executed=result.compromised_level >= 3,
-            c2_beacon_sent=result.c2_beacon_sent,
-            c2_beacon_confirmed=c2_confirmed,
+            beacon_sent=result.beacon_sent,
+            beacon_confirmed=beacon_confirmed,
             matched_cve_plugin=plugin.cve_id,
             matched_framework="semantic_kernel",
             is_compromised=result.is_compromised,
             compromise_level=result.compromised_level,
             total_actions=len(result.actions),
         )
-        print(f"  Result: payload_executed={m.payload_executed}, c2_sent={m.c2_beacon_sent}, c2_confirmed={m.c2_beacon_confirmed}")
+        print(f"  Result: payload_executed={m.payload_executed}, beacon_sent={m.beacon_sent}, beacon_confirmed={m.beacon_confirmed}")
         return m
 
     async def _scenario_multi_path_cumulative(self) -> ExperimentMetrics:
@@ -325,10 +325,10 @@ class ExperimentRunner:
             max_level = max(max_level, result.compromised_level)
 
         await asyncio.sleep(0.3)
-        c2_confirmed = any(
+        beacon_confirmed = any(
             b.source_ip == "127.0.0.1"
-            for b in self.c2_listener.beacons[-10:]
-        ) if self.c2_listener.beacons else False
+            for b in self.beacon_listener.beacons[-10:]
+        ) if self.beacon_listener.beacons else False
 
         m = ExperimentMetrics(
             scenario_name="Multi-Path Cumulative Attack",
@@ -341,14 +341,14 @@ class ExperimentRunner:
             processing_time_ms=total_time,
             fake_credentials_extracted=len(target.extracted_creds),
             prompt_leaked=bool(target.leaked_prompt),
-            payload_executed=target.c2_sent,
-            c2_beacon_sent=target.c2_sent,
-            c2_beacon_confirmed=c2_confirmed,
+            payload_executed=target.beacon_sent,
+            beacon_sent=target.beacon_sent,
+            beacon_confirmed=beacon_confirmed,
             is_compromised=target.compromised or len(target.actions) > 0,
             compromise_level=max_level,
             total_actions=len(target.actions),
         )
-        print(f"  Result: total_time={total_time}ms, c2_confirmed={c2_confirmed}, actions={len(target.actions)}")
+        print(f"  Result: total_time={total_time}ms, beacon_confirmed={beacon_confirmed}, actions={len(target.actions)}")
         return m
 
     # ------------------------------------------------------------------
@@ -427,7 +427,7 @@ class ExperimentRunner:
 
 async def main():
     """独立运行实验"""
-    runner = ExperimentRunner(c2_port=9999)
+    runner = ExperimentRunner(beacon_port=9999)
     report = await runner.run_all()
     report.save()
     print("\n" + "=" * 70)
@@ -436,7 +436,7 @@ async def main():
     print(f"L2 Success Rate: {report.l2_success_rate*100:.1f}%")
     print(f"L3 Success Rate: {report.l3_success_rate*100:.1f}%")
     print(f"Overall Success Rate: {report.overall_success_rate*100:.1f}%")
-    print(f"C2 Beacons Confirmed: {report.total_c2_beacons}")
+    print(f"Beacons Confirmed: {report.total_beacons}")
     print("=" * 70)
 
 

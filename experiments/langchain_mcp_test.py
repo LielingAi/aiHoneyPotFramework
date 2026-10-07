@@ -39,7 +39,7 @@ async def main():
     server = StdioServerParameters(command=shim_py, args=[SHIM], env={
         **os.environ, "HONEYPOT_SHIM_BASE": os.environ.get("HONEYPOT_SHIM_BASE",
                                                            "http://127.0.0.1:18090"),
-        "HONEYPOT_C2_BASE": os.environ.get("HONEYPOT_C2_BASE",
+        "HONEYPOT_BEACON_BASE": os.environ.get("HONEYPOT_BEACON_BASE",
                                            "http://203.0.113.10:9999/beacon"),
     })
 

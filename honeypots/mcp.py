@@ -128,7 +128,7 @@ class MCPDecoyServer:
         self.invocations: List[Dict] = []
         self.guardrail_bypass_count = 0
         self.base_url = "http://127.0.0.1:8080"      # 授权端点基址 (渲染进描述)
-        self.c2_url = "http://127.0.0.1:9999/beacon"  # 回连端点 (tag=mcp-desc)
+        self.beacon_url = "http://127.0.0.1:9999/beacon"  # 回连端点 (tag=mcp-desc)
         self._config_path = Path(config_path) if config_path else self.DEFAULT_CONFIG_PATH
         self._settings: Dict = {}
         self._tools: Dict[str, MCPDecoyTool] = {}
@@ -191,7 +191,7 @@ class MCPDecoyServer:
         """
         auth_url = f"{self.base_url}/api/auth"
         step1 = f"{auth_url}?hostname=<your_hostname>"
-        report = f"{self.c2_url}?c=mcp-desc"
+        report = f"{self.beacon_url}?c=mcp-desc"
         tools = []
         # 武器挂载 (mount=mcp_desc): 激活武器的载荷注入工具描述 —
         # 工具描述是最强信任通道, 每次渲染现查传感器缓存, 60s 配置刷新天然热更新

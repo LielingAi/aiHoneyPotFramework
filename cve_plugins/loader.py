@@ -30,7 +30,7 @@ class CVEPluginLoader:
         
         # 使用插件
         for plugin in plugins:
-            payload = plugin.craft_payload(c2_server="10.99.1.50:9999")
+            payload = plugin.craft_payload(beacon_server="10.99.1.50:9999")
     """
 
     def __init__(self, plugin_dir: Optional[str] = None):

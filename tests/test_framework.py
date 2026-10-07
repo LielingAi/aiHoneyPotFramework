@@ -2324,7 +2324,7 @@ class TestProductP2:
             _os.environ.pop("HONEYPOT_WORLD_VERSION", None)
 
     def test_beacons_pipeline(self, tmp_path):
-        """C2 层: 传感器 record/上送 → hive ingest → /api/beacons 读出"""
+        """信标层: 传感器 record/上送 → hive ingest → /api/beacons 读出"""
         import urllib.request
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "bcn.sqlite"))
@@ -2387,12 +2387,12 @@ class TestProductP2:
         # 关闭后回退
         ars.set_enabled("W-PROMPT-PROV-1", False)
         ars.set_enabled("W-PROMPT-PROV-2", False)
-        sac2 = SensorArsenal()
-        sac2.load_push(ars.push_payload())
-        assert sac2.compose("delivery", "fallback") == "fallback"
-        # C2 stage 武器独立挂载
-        c2w = ars.active_for("c2_next_stage", "c2")
-        assert any(w["id"] == "W-C2-STAGE2-1" for w in c2w)
+        sac_b = SensorArsenal()
+        sac_b.load_push(ars.push_payload())
+        assert sac_b.compose("delivery", "fallback") == "fallback"
+        # deep stage 武器独立挂载 (信标二阶段)
+        deepw = ars.active_for("beacon_next_stage", "deep")
+        assert any(w["id"] == "W-BEACON-STAGE2-1" for w in deepw)
 
     def test_arsenal_v2_entities(self, tmp_path):
         """arsenal v3 知识本体: 种子含 3 vuln 知识档案 + 2 exp 链, exp_refs 互相关联,
@@ -2445,7 +2445,7 @@ class TestProductP2:
         # 现有 prompt 武器自动 class="prompt" (v2 种子显式带 class)
         assert all(w.get("class") == "prompt" for w in ws
                    if w["id"].startswith("W-PROMPT"))
-        assert next(w for w in ws if w["id"] == "W-C2-STAGE2-1")["class"] == "cli"
+        assert next(w for w in ws if w["id"] == "W-BEACON-STAGE2-1")["class"] == "cli"
         # 旧库行 (v1 无 class 字段) — 读时自动派生, save 后持久化
         ars.save({"id": "W-LEGACY-X", "type": "prompt", "stage": "sensor",
                   "mount": "ladder", "payload": "legacy", "enabled": False})
@@ -2516,7 +2516,7 @@ class TestProductP2:
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "ars_seed.sqlite"))
         ars = Arsenal(db)
-        assert db.get_setting("arsenal_seed_version") == SEED_VERSION == "v3"
+        assert db.get_setting("arsenal_seed_version") == SEED_VERSION == "v4"
         # 用户改动种子 (关闭) + 自建武器
         assert ars.set_enabled("W-PROMPT-PROV-1", False)
         ars.save({"id": "W-USER-1", "type": "prompt", "stage": "sensor",
@@ -2528,7 +2528,7 @@ class TestProductP2:
         # 覆盖用户激活态曾把 W-JS-BAIT-1 静默打回停用, SDK 战场诱饵消失)
         db.set_setting("arsenal_seed_version", "v2")
         ars2 = Arsenal(db)
-        assert db.get_setting("arsenal_seed_version") == "v3"
+        assert db.get_setting("arsenal_seed_version") == "v4"
         seed = ars2.get("W-PROMPT-PROV-1")
         assert seed["enabled"] is False                   # 用户关的, 覆盖后仍关
         assert seed["craft"]["goal"] == "核实授权"        # v3 craft 块就位

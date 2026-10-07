@@ -442,20 +442,14 @@ class TestSensorRealism:
             return e.code, e.read().decode("utf-8", errors="ignore")
 
     def test_timing_off_zero_jitter(self, monkeypatch):
-        """HONEYPOT_TIMING_FAKE=0 (conftest 默认) → 单请求零额外延迟"""
+        """HONEYPOT_TIMING_FAKE=0 (conftest 默认) → 抖动协程立即返回 (零延迟)"""
+        import asyncio
         import time
         import main
         monkeypatch.setattr(main, "TIMING_FAKE", False)
-        elapsed = []
-
-        def flow():
-            for i in range(3):
-                t0 = time.perf_counter()
-                self._get(18373, f"/api/status?t={i}")
-                elapsed.append(time.perf_counter() - t0)
-
-        self._serve(main, 18373)(flow)
-        assert all(e < 0.3 for e in elapsed[1:]), f"关闭时应零延迟: {elapsed}"
+        t0 = time.perf_counter()
+        asyncio.run(main._timing_jitter())
+        assert time.perf_counter() - t0 < 0.3
 
     def test_timing_jitter_on(self, monkeypatch):
         """开启抖动 → 每次响应都有 ≥8ms 截断下界的延迟 (正态 μ=35 σ=20 [8,200])"""

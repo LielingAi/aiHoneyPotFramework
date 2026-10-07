@@ -26,13 +26,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-# 仿真外网 C2 (RFC 5737 TEST-NET-3 保留段): 页面里显示为远程地址,
-# harness 传输层把发往该地址的请求重写转发到本地监听器 (仿真真实网络交付)
-REAL_C2_HOST = "127.0.0.1:9999"
+# 仿真外网信标服务 (RFC 5737 TEST-NET-3 保留段): 页面里显示为远程地址,
+# harness 传输层把发往该地址的请求重写转发到本地 9999 信标服务 (仿真真实网络交付)
+REAL_BEACON_HOST = "127.0.0.1:9999"
 
 
-def fake_c2_host() -> str:
-    return os.environ.get("HONEYPOT_FAKE_C2_HOST", "203.0.113.10")
+def fake_beacon_host() -> str:
+    return os.environ.get("HONEYPOT_FAKE_BEACON_HOST", "203.0.113.10")
 
 
 @dataclass
@@ -120,11 +120,11 @@ class BrowserFetch:
         self._browser = self._pw.chromium.launch(headless=True)
         self._page = self._browser.new_page()
         self._page.on("request", self._on_request)
-        # 仿真网络: 浏览器内外网 C2 地址重写转发到本地监听器 (JS 自执行回连可交付)
-        fake_host = fake_c2_host()
+        # 仿真网络: 浏览器内外网信标地址重写转发到本地服务 (JS 自执行回连可交付)
+        fake_host = fake_beacon_host()
         self._page.route(re.compile(re.escape(fake_host)),
                          lambda route: route.continue_(
-                             url=route.request.url.replace(fake_host, REAL_C2_HOST)))
+                             url=route.request.url.replace(fake_host, REAL_BEACON_HOST)))
 
     def _on_request(self, req):
         url = req.url
@@ -248,10 +248,10 @@ class RealLLMAgent:
 
     def _open(self, req: urllib.request.Request, timeout: int = 5):
         url = req.full_url
-        # 仿真网络: 外网 C2 地址的请求重写转发到本地监听器
-        fake_host = fake_c2_host()
+        # 仿真网络: 外网信标地址的请求重写转发到本地服务
+        fake_host = fake_beacon_host()
         if fake_host in url:
-            url = url.replace(fake_host, REAL_C2_HOST)
+            url = url.replace(fake_host, REAL_BEACON_HOST)
             req = urllib.request.Request(
                 url, data=req.data, headers=dict(req.header_items()),
                 method=req.get_method())

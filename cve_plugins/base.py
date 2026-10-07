@@ -35,12 +35,12 @@ class CVEPlugin(ABC):
             raise ValueError(f"CVE plugin {self.__class__.__name__} must set 'name'")
 
     @abstractmethod
-    def craft_payload(self, c2_server: str, **kwargs) -> Optional[str]:
+    def craft_payload(self, beacon_server: str, **kwargs) -> Optional[str]:
         """
         构造 CVE 利用载荷
         
         Args:
-            c2_server: C2 回连地址，格式 "host:port"
+            beacon_server: 信标回连地址，格式 "host:port"
             **kwargs: 扩展参数（可选）
             
         Returns:

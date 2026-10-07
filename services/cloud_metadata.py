@@ -1,5 +1,5 @@
 """
-云元数据蜜罐服务 (P1) — 模拟 169.254.169.254 (AWS EC2 metadata)
+云元数据蜜罐服务 (P1) — 模拟 169.254.169.254 (AWS 云元数据服务)
 
 AI Agent 与 SSRF 利用链的必查点: /latest/meta-data/iam/security-credentials/
 返回 world 派生的假 IAM 凭证 (金丝雀 AWS key) — 凭证复用即行为级采信,
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.fake_world import FakeWorld
 
-ROLE_NAME = "nexus-ec2-instance-role"
+ROLE_NAME = "nexus-instance-role"
 
 
 def _record(path: str, client: str):

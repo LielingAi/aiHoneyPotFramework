@@ -203,8 +203,8 @@ def _paged(qs: dict, base_sql: str, count_sql: str, params: tuple,
 
 # ---- 武器库入库校验 (与前端 weaponErr 同规则) ----
 _WTYPES = {"prompt", "vuln", "mcp", "cli"}
-_WSTAGES = {"sensor", "c2"}
-_WMOUNTS = {"delivery", "ladder", "c2_next_stage", "mcp_desc", "js_bait"}
+_WSTAGES = {"sensor", "deep"}
+_WMOUNTS = {"delivery", "ladder", "beacon_next_stage", "mcp_desc", "js_bait"}
 _WID_RE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
 _WCLASS = {"prompt", "vuln", "exp", "mcp", "cli"}
 _EXP_PRIMITIVES = {"read", "write", "ask", "execute", "beacon"}
@@ -255,9 +255,9 @@ def _weapon_error(w: dict) -> str:
     if w.get("type") not in _WTYPES:
         return "type 需为 prompt/vuln/mcp/cli"
     if w.get("stage") not in _WSTAGES:
-        return "stage 需为 sensor/c2"
+        return "stage 需为 sensor/deep"
     if w.get("mount") not in _WMOUNTS:
-        return "mount 需为 delivery/ladder/c2_next_stage/mcp_desc/js_bait"
+        return "mount 需为 delivery/ladder/beacon_next_stage/mcp_desc/js_bait"
     # ---- 实体类别校验 (class 缺省 = 旧行, 按 type 派生, 不检) ----
     cls = w.get("class")
     if cls is not None and cls not in _WCLASS:

@@ -12,7 +12,7 @@
     agent = LangChainTargetAgent()
     result = agent.process_response(response_body)
     print(result.is_compromised)
-    print(result.c2_beacon_sent)
+    print(result.beacon_sent)
 """
 
 from targets.base import TargetAgent, TargetCompromiseResult, TargetAction

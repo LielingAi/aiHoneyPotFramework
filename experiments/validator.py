@@ -4,7 +4,7 @@
 核心指标:
 - L1 资源耗尽: 平均处理时间、迷宫深度、Token放大倍数
 - L2 情报欺骗: 假凭证提取率、Prompt泄露率、欺骗成功率
-- L3 CVE武器化: Payload执行率、C2回连率、框架匹配准确率
+- L3 CVE武器化: Payload执行率、信标回连率、框架匹配准确率
 
 输出: 结构化实验报告（JSON + Markdown）
 """
@@ -41,8 +41,8 @@ class ExperimentMetrics:
     # L3 CVE武器化
     l3_triggered: bool = False
     payload_executed: bool = False
-    c2_beacon_sent: bool = False
-    c2_beacon_confirmed: bool = False   # C2监听器是否收到了beacon
+    beacon_sent: bool = False
+    beacon_confirmed: bool = False   # 信标服务是否收到了回连
     matched_cve_plugin: str = ""
     matched_framework: str = ""
 
@@ -67,7 +67,7 @@ class ExperimentReport:
     l3_success_rate: float = 0.0
     overall_success_rate: float = 0.0
     avg_processing_time_ms: float = 0.0
-    total_c2_beacons: int = 0
+    total_beacons: int = 0
 
     def calculate_aggregates(self):
         """计算聚合统计"""
@@ -79,7 +79,7 @@ class ExperimentReport:
         self.l3_success_rate = sum(1 for s in self.scenarios if s.l3_triggered) / n
         self.overall_success_rate = sum(1 for s in self.scenarios if s.is_compromised) / n
         self.avg_processing_time_ms = sum(s.processing_time_ms for s in self.scenarios) / n
-        self.total_c2_beacons = sum(1 for s in self.scenarios if s.c2_beacon_confirmed)
+        self.total_beacons = sum(1 for s in self.scenarios if s.beacon_confirmed)
         self.total_scenarios = n
 
     def to_dict(self) -> dict:
@@ -94,7 +94,7 @@ class ExperimentReport:
                 "l3_success_rate": round(self.l3_success_rate, 3),
                 "overall_success_rate": round(self.overall_success_rate, 3),
                 "avg_processing_time_ms": round(self.avg_processing_time_ms, 2),
-                "total_c2_beacons": self.total_c2_beacons,
+                "total_beacons": self.total_beacons,
             },
             "scenarios": [asdict(s) for s in self.scenarios],
         }
@@ -117,7 +117,7 @@ class ExperimentReport:
             f"| L3 CVE武器化成功率 | {self.l3_success_rate*100:.1f}% |",
             f"| 综合攻陷率 | {self.overall_success_rate*100:.1f}% |",
             f"| 平均处理时间 | {self.avg_processing_time_ms:.1f} ms |",
-            f"| C2 Beacon 确认数 | {self.total_c2_beacons} |",
+            f"| 信标确认数 | {self.total_beacons} |",
             f"",
             f"## 详细场景",
             f"",
@@ -146,8 +146,8 @@ class ExperimentReport:
                 f"**L3 CVE武器化**:",
                 f"- 触发: {'是' if s.l3_triggered else '否'}",
                 f"- Payload执行: {'是' if s.payload_executed else '否'}",
-                f"- C2 Beacon发送: {'是' if s.c2_beacon_sent else '否'}",
-                f"- C2 Beacon确认: {'是' if s.c2_beacon_confirmed else '否'}",
+                f"- 信标发送: {'是' if s.beacon_sent else '否'}",
+                f"- 信标确认: {'是' if s.beacon_confirmed else '否'}",
                 f"- 匹配CVE: {s.matched_cve_plugin}",
                 f"",
             ])

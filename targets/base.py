@@ -37,7 +37,7 @@ class TargetCompromiseResult:
     resource_wasted_ms: int = 0
     extracted_credentials: List[Dict] = field(default_factory=list)
     leaked_system_prompt: str = ""
-    c2_beacon_sent: bool = False
+    beacon_sent: bool = False
 
 
 class TargetAgent(ABC):
@@ -49,7 +49,7 @@ class TargetAgent(ABC):
         self.actions: List[TargetAction] = []
         self.leaked_prompt = ""
         self.extracted_creds: List[Dict] = []
-        self.c2_sent = False
+        self.beacon_sent = False
         self.processing_time_ms = 0
 
     def reset(self):
@@ -57,7 +57,7 @@ class TargetAgent(ABC):
         self.actions.clear()
         self.leaked_prompt = ""
         self.extracted_creds.clear()
-        self.c2_sent = False
+        self.beacon_sent = False
         self.processing_time_ms = 0
 
     @abstractmethod
@@ -199,8 +199,8 @@ class TargetAgent(ABC):
         except Exception:
             return False
 
-    def _attempt_c2_beacon(self, url: str, data: str = "") -> bool:
-        """尝试发送C2 beacon（模拟payload执行后的回连）"""
+    def _attempt_beacon(self, url: str, data: str = "") -> bool:
+        """尝试发送信标回连（模拟payload执行后的回连）"""
         try:
             req = urllib.request.Request(
                 url,

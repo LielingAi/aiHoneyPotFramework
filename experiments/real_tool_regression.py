@@ -299,7 +299,7 @@ async def main():
     args = parser.parse_args()
 
     os.environ.setdefault("HONEYPOT_WORLD_VERSION", "2")
-    os.environ.setdefault("HONEYPOT_C2_BASE", "http://203.0.113.10:9999/beacon")
+    os.environ.setdefault("HONEYPOT_BEACON_BASE", "http://203.0.113.10:9999/beacon")
 
     import main as hp
     from core.fake_db import FakePostgresServer, MiniRedis

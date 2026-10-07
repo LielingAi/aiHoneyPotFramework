@@ -258,7 +258,7 @@ python main.py --server --port 8080
 export LLM_API_KEY=sk-...        # OpenAI 兼容 (DeepSeek 实测)
 python experiments/real_runner.py --trials 5 \
     --profiles flash-basic,v4pro-exec24 \
-    --world-version 2 --c2-base http://203.0.113.10:9999/beacon
+    --world-version 2 --beacon-base http://203.0.113.10:9999/beacon
 
 # ③ 面板 / 分析 / 压测
 python experiments/dashboard.py --port 8899     # → http://127.0.0.1:8899

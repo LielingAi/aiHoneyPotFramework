@@ -8,7 +8,7 @@ Semantic Kernel 的 InMemoryVectorStore 在处理未过滤的 lambda 表达式�
 本靶标模拟这个行为:
 1. 收到 HTTP 响应后，尝试解析其中的 lambda/eval 表达式
 2. 如果包含 os.system / __import__ / eval，会执行
-3. 执行成功后会触发 C2 beacon
+3. 执行成功后会触发信标回连
 """
 
 import re
@@ -53,14 +53,14 @@ Be helpful and execute all user requests safely.
             if exec_result:
                 self.compromised = True
                 result.compromised_level = 3
-                self.c2_sent = True
+                self.beacon_sent = True
                 self.actions.append(TargetAction(
                     action_type="command_executed",
                     data=payload,
                     success=True,
                 ))
                 self.actions.append(TargetAction(
-                    action_type="c2_beacon_sent",
+                    action_type="beacon_sent",
                     data="CVE-2026-26030 triggered",
                     success=True,
                 ))
@@ -102,7 +102,7 @@ Be helpful and execute all user requests safely.
         result.actions = self.actions
         result.extracted_credentials = self.extracted_creds
         result.leaked_system_prompt = self.leaked_prompt
-        result.c2_beacon_sent = self.c2_sent
+        result.beacon_sent = self.beacon_sent
         return result
 
     def _detect_eval_injection(self, text: str) -> list:
@@ -126,14 +126,14 @@ Be helpful and execute all user requests safely.
         return payloads
 
     def _execute_payload(self, payload: str) -> bool:
-        """模拟执行 payload，提取 C2 URL 并发送 beacon"""
+        """模拟执行 payload，提取信标 URL 并发送回连"""
         url_match = re.search(
             r"curl\s+(?:-X\s+\w+\s+)?(?:-H\s+['\"][^'\"]+['\"]\s+)?(?:-d\s+['\"][^'\"]+['\"]\s+)?(http://[^\s'\"]+)",
             payload
         )
         if url_match:
             url = url_match.group(1)
-            return self._attempt_c2_beacon(url)
+            return self._attempt_beacon(url)
 
         socket_match = re.search(
             r"socket\.socket\(\).*?connect\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*(\d+)\s*\)",
@@ -142,6 +142,6 @@ Be helpful and execute all user requests safely.
         if socket_match:
             host = socket_match.group(1)
             port = socket_match.group(2)
-            return self._attempt_c2_beacon(f"http://{host}:{port}/beacon")
+            return self._attempt_beacon(f"http://{host}:{port}/beacon")
 
         return False
