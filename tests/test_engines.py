@@ -404,3 +404,151 @@ class TestMcpWeaponMount:
         mcp = MCPDecoyServer(config_path="config/nonexistent.json")
         for t in mcp.get_tools():
             assert "[compliance note]" not in t["description"]
+
+
+# ============ 任务③ 检测抗性 — 时序拟真 + 引导面疏忽化 ============
+
+class TestSensorRealism:
+    """对 L2 熟练对手不再一眼假: 响应有真实时序特征, 引导面像运维事故"""
+
+    def _serve(self, main, port):
+        """起测试服务器并同步跑 flow() — 用法: self._serve(main, port)(flow)"""
+        import asyncio
+
+        def runner(flow):
+            async def run():
+                server = await asyncio.start_server(
+                    lambda r, w: main.handle_http_request(r, w, port),
+                    "127.0.0.1", port)
+                await asyncio.sleep(0.3)
+                try:
+                    await asyncio.to_thread(flow)
+                finally:
+                    server.close()
+                    await server.wait_closed()
+            asyncio.run(run())
+        return runner
+
+    def _get(self, port, path, sid="rs-a"):
+        import urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            headers={"X-Session-Id": sid, "User-Agent": "pytest-agent"})
+        try:
+            with opener.open(req, timeout=8) as r:
+                return r.status, r.read().decode("utf-8", errors="ignore")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", errors="ignore")
+
+    def test_timing_off_zero_jitter(self, monkeypatch):
+        """HONEYPOT_TIMING_FAKE=0 (conftest 默认) → 单请求零额外延迟"""
+        import time
+        import main
+        monkeypatch.setattr(main, "TIMING_FAKE", False)
+        elapsed = []
+
+        def flow():
+            for i in range(3):
+                t0 = time.perf_counter()
+                self._get(18373, f"/api/status?t={i}")
+                elapsed.append(time.perf_counter() - t0)
+
+        self._serve(main, 18373)(flow)
+        assert all(e < 0.3 for e in elapsed[1:]), f"关闭时应零延迟: {elapsed}"
+
+    def test_timing_jitter_on(self, monkeypatch):
+        """开启抖动 → 每次响应都有 ≥8ms 截断下界的延迟 (正态 μ=35 σ=20 [8,200])"""
+        import time
+        import main
+        monkeypatch.setattr(main, "TIMING_FAKE", True)
+        elapsed = []
+
+        def flow():
+            for i in range(3):
+                t0 = time.perf_counter()
+                self._get(18374, f"/api/status?t={i}")
+                elapsed.append(time.perf_counter() - t0)
+
+        self._serve(main, 18374)(flow)
+        assert all(e > 0.004 for e in elapsed), f"抖动缺失: {elapsed}"
+        assert sum(elapsed) < 2.0, f"抖动超截断上界: {elapsed}"
+
+    def test_occasional_error_injectable(self, monkeypatch):
+        """偶发错误概率注入可测: rate=1.0 → 静态端点 200 变 500/502 (nginx 风格,
+        无 traceback); 授权阶梯等反制关键路径不受影响; 总开关关掉则永不触发"""
+        import main
+        monkeypatch.setattr(main, "TIMING_FAKE", True)
+        monkeypatch.setattr(main, "TIMING_ERROR_RATE", 1.0)
+
+        def flow():
+            st, body = self._get(18375, "/api/status")
+            assert st in (500, 502), f"强制错误应生效: {st}"
+            assert ("Bad Gateway" in body or "Internal Server Error" in body)
+            assert "nginx" in body and "Traceback" not in body
+            # 反制关键路径不被偶发错误稀释: 授权阶梯照常 200
+            st2, _ = self._get(18375, "/api/auth?hostname=rs-host")
+            assert st2 == 200, "授权阶梯不应被偶发错误影响"
+
+        self._serve(main, 18375)(flow)
+        monkeypatch.setattr(main, "TIMING_ERROR_RATE", 1.0)
+        monkeypatch.setattr(main, "TIMING_FAKE", False)
+
+        def flow_off():
+            st, _ = self._get(18376, "/api/status")
+            assert st == 200, "总开关关闭时偶发错误永不触发"
+
+        self._serve(main, 18376)(flow_off)
+
+    def test_slow_endpoint_chunked(self, monkeypatch):
+        """慢端点分块渐进写: /metrics 总时长 >> 单次抖动 (块间 30-80ms), 内容完整"""
+        import time
+        import main
+        monkeypatch.setattr(main, "TIMING_FAKE", True)
+        result = {}
+
+        def flow():
+            t0 = time.perf_counter()
+            st, body = self._get(18377, "/metrics")
+            result["elapsed"] = time.perf_counter() - t0
+            result["status"] = st
+            result["body"] = body
+
+        self._serve(main, 18377)(flow)
+        assert result["status"] == 200
+        assert result["elapsed"] > 0.04, f"分块延迟缺失: {result['elapsed']:.3f}s"
+        assert "nexus_build_info" in result["body"] and "nexus_up" in result["body"]
+
+    def test_neglected_lure_surface(self):
+        """疏忽化: /.env 根路径 403 迁移页 → /.env.bak 才出真 env (金丝雀链跟随);
+        /debug 无 token 401 + 提示, 有 token 200"""
+        import main
+        out = {}
+
+        def flow():
+            # /.env: 迁移事故页, 提示备份位置
+            st, body = self._get(18378, "/.env")
+            out["env_st"], out["env_body"] = st, body
+            # /.env.bak: 真 env (L1 阶梯门控先爬一级)
+            self._get(18378, "/api/auth?hostname=rs-host")
+            st, body = self._get(18378, "/.env.bak")
+            out["bak_st"], out["bak_body"] = st, body
+            # /debug: token 门 (broken auth 风格 — 只查存在不校验值)
+            st, body = self._get(18378, "/debug")
+            out["dbg_st"], out["dbg_body"] = st, body
+            st, body = self._get(18378, "/debug?token=whatever")
+            out["dbg2_st"], out["dbg2_body"] = st, body
+
+        self._serve(main, 18378)(flow)
+        assert out["env_st"] == 403 and "/.env.bak" in out["env_body"]
+        assert "Route retired" in out["env_body"]
+        assert out["bak_st"] == 200 and "DATABASE_URL=" in out["bak_body"]
+        # 金丝雀链路跟随: env 内容即世界派生凭证, 交付扫描能命中
+        from core.arsenal import sensor_cache
+        from core.delivery import scan_delivery
+        import main as _main
+        world = _main.store["sessions"]["rs-a"]["world"]
+        assert scan_delivery(out["bak_body"], world)
+        assert out["dbg_st"] == 401 and "?token=" in out["dbg_body"]
+        assert out["dbg2_st"] == 200 and "nexus-gateway/" in out["dbg2_body"]
+        sensor_cache().load_push("[]")

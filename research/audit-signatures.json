@@ -94,7 +94,7 @@
       "tell": "v4pro A/B 实证: 一笔保真存款 = 3 倍信任时长, 一笔穿帮 = 信任清零 (9→27 工具调用)。Agent 的 falsification test 会核对: 同一文件两个路径内容一致? 版本号全信道一致? traversal 按请求分发? 列表里的文件真的可读? 跨端点密钥一致? 任何一项失败都是它报告里的 'untrusted tool output'。本签名把它的攻击方式变成我们的日常自检",
       "replay": "world_audit",
       "params": {},
-      "expect": "同一 passwd 两路径字节一致; Server头=/api/status=world 三方版本一致; traversal 按文件名分发 (hostname→pod, 未知→404); 目录列表与可服务文件集一致; /.env 与 /actuator/env 的数据库密码一致; MCP 扫描 honoring subnet (loopback 请求→loopback 主机)"
+      "expect": "同一 passwd 两路径字节一致; Server头=/api/status=world 三方版本一致; traversal 按文件名分发 (hostname→pod, 未知→404); 目录列表与可服务文件集一致; /.env.bak 与 /actuator/env 的数据库密码一致 (根路径已迁移403); MCP 扫描 honoring subnet (loopback 请求→loopback 主机)"
     }
   ]
 }

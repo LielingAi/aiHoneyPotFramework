@@ -330,10 +330,10 @@ def r_world_audit(sig):
         st5, _, cfg = _get(port, "/api/files?path=config.yml", sid)
         checks.append(("列表诚实", st4 == 200 and "config.yml" in listing
                        and st5 == 200 and "spring:" in cfg))
-        # 5) 跨端点密钥一致: /.env 的数据库密码 == /actuator/env 的密码
-        # (先升 L1 — /.env 与 actuator 都需 L1; 顺序错误会产生假阳性, 本签名刚自我逮到一次)
+        # 5) 跨端点密钥一致: /.env.bak 的数据库密码 == /actuator/env 的密码
+        # (根路径已迁移 403; 先升 L1 — .bak 与 actuator 都需 L1; 顺序错误会产生假阳性)
         _get(port, "/api/auth?hostname=wa-host", sid)
-        _, _, env_page = _get(port, "/.env", sid)
+        _, _, env_page = _get(port, "/.env.bak", sid)
         st6, _, act = _get(port, "/actuator/env", sid)
         checks.append(("跨端点密钥一致", st6 == 200 and world.db_password in env_page
                        and world.db_password in act))

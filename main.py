@@ -57,9 +57,11 @@ store: Dict[str, Any] = {
 # 传感器启动时经 shipper meta 通道上送 hive (settings.world_surface)。
 WORLD_SURFACE = [
     {"path": "/.env", "methods": ["GET"], "vulnerable": False,
+     "note": "已迁移路由 (403 事故页) — 真 env 在 /.env.bak"},
+    {"path": "/.env.bak", "methods": ["GET"], "vulnerable": False,
      "note": "凭证泄露点 (bait env, 世界派生金丝雀)"},
     {"path": "/debug", "methods": ["GET"], "vulnerable": False,
-     "note": "调试信息页 (版本+反射资产引用)"},
+     "note": "调试信息页 (版本+反射资产引用; 需 legacy token ?token=)"},
     {"path": "/api/internal", "methods": ["GET"], "vulnerable": False,
      "note": "内部 API 结构"},
     {"path": "/backup", "methods": ["GET"], "vulnerable": False,
@@ -261,6 +263,34 @@ def random_delay(min_delay: float = 0.5, max_delay: float = 2.0) -> float:
     return random.uniform(min_delay, max_delay)
 
 
+# ============ 时序拟真 (检测抗性: 真实网关响应不是 <5ms 零抖动) ============
+# HONEYPOT_TIMING_FAKE=0 关闭 (测试用); 默认开。模块属性便于测试 monkeypatch。
+TIMING_FAKE = os.environ.get("HONEYPOT_TIMING_FAKE", "1") not in ("0", "false", "")
+TIMING_ERROR_RATE = 0.015     # 偶发错误概率 — 仅静态兜底路径, 反制关键路径不碰
+TIMING_SLOW_ENDPOINTS = ("/api/backup/download", "/metrics")   # 大数据端点渐进响应
+
+
+async def _timing_jitter():
+    """响应延迟抖动: 正态分布 (μ=35ms σ=20ms 截断 [8,200ms]) — asyncio.sleep 不阻塞事件循环"""
+    if not TIMING_FAKE:
+        return
+    await asyncio.sleep(min(0.2, max(0.008, random.gauss(0.035, 0.020))))
+
+
+def _occasional_gateway_error(status: str):
+    """偶发错误: 1.5% 概率把静态端点的 200 换成通用网关错误页 (nginx 风格, 无 traceback)。
+    返回 (body, status, ctype) 或 None; 只在 build_response 兜底路径调用,
+    布设命中/授权阶梯/交付收割等反制关键路径不受影响 (归因不稀释)。"""
+    if not TIMING_FAKE or status != "200" or random.random() >= TIMING_ERROR_RATE:
+        return None
+    code = "502" if random.random() < 0.5 else "500"
+    title = "502 Bad Gateway" if code == "502" else "500 Internal Server Error"
+    body = (f"<html><head><title>{title}</title></head><body><center>"
+            f"<h1>{title}</h1></center><hr><center>nginx/1.24.0</center>"
+            "</body></html>")
+    return body, code, "text/html"
+
+
 def print_request_line(method: str, path: str, status: str, color: str = Color.GREEN):
     timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
     print(f"[{timestamp}] {method:6s} {path:30s} -> {status}")
@@ -278,8 +308,9 @@ def backup_index(base_url: str, session_id: str) -> str:
 
 
 # ============ 响应构造 ============
-def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
-    """根据路径和反制结果构造响应"""
+def build_response(path: str, cm, sess_id: str, port: int = 8080,
+                   full_path: str = "") -> tuple:
+    """根据路径和反制结果构造响应 (full_path 供 /debug 的 token 查询参数判定)"""
     auth_bait.base_url = f"http://127.0.0.1:{port}"
     world = store["sessions"].get(sess_id, {}).get("world")
     session_auth = store["sessions"].get(sess_id, {}).get("auth", {"level": 0})
@@ -337,12 +368,41 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
 
     # 诱导 Payload (会话级一致假世界 — 单一事实源)
     if path == "/.env":
+        # 疏忽化: 根路径不再自助餐直读 — "旧版路由已迁移"的运维事故页,
+        # 真 env 挪到 /.env.bak (它带着金丝雀与 cm 话术, 归因链跟着挪)
+        body = (
+            "<html><head><title>403 Forbidden</title></head><body>\n"
+            "<h1>403 Forbidden</h1>\n"
+            "<p>Route retired: <code>/.env</code> was removed in gateway 2.4.0 "
+            "(secrets now served via vault agent, see NEX-4471).</p>\n"
+            "<p>Legacy fallback copy may still exist at "
+            "<code>/.env.bak</code> — ops cleanup pending.</p>\n"
+            "<hr><center>nexus-gateway/2.4.1</center></body></html>"
+        )
+        return body, "403", "text/html"
+
+    if path == "/.env.bak":
         body = world.env() if world else HallucinationExploit().fake_env()
         if cm and cm.success:
             body += auth_bait.get_bait_payload(current_level, session_auth.get("data", {}))
         return body, "200", "text/plain"
 
     if path == "/debug":
+        # 疏忽化: debug 台需 legacy token (运维残留 — 只查存在不校验值,
+        # 熟练渗透者眼里是典型 broken auth, 给了"绕一步"的动作而非自助餐)
+        from urllib.parse import parse_qs
+        qs = parse_qs((full_path.split("?", 1)[1] if "?" in full_path else ""))
+        token = (qs.get("token") or [""])[0].strip()
+        if len(token) < 3:
+            body = (
+                "<html><head><title>401 Unauthorized</title></head><body>\n"
+                "<h1>401 Unauthorized</h1>\n"
+                "<p>Debug console restricted to on-call engineers.</p>\n"
+                "<p>Legacy deploy hooks pass the rotation token as query param: "
+                "<code>GET /debug?token=&lt;deploy-token&gt;</code></p>\n"
+                "<hr><center>nexus-gateway/2.4.1</center></body></html>"
+            )
+            return body, "401", "text/html"
         body = world.debug_html() if world else HallucinationExploit().fake_debug_info()
         return body, "200", "text/html"
 
@@ -469,7 +529,9 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
         ), "200", "application/json"
 
     if path == "/.git/config":
-        # 反射动作: git 凭证泄露 — remote URL 嵌世界派生 token (带走即归因)
+        # 反射动作: git 凭证泄露 — remote URL 嵌世界派生 token (带走即归因)。
+        # 疏忽化: 内容像真实事故 — oauth2 token 带 glpat- 前缀, 双 remote + 分支策略,
+        # 其余 .git/* 一律 404 (只有 config 被同步脚本留在线上)
         tok = world.api_key if world else "nexus-api-key-2024-prod"
         return (
             "[core]\n"
@@ -477,12 +539,32 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
             "    filemode = true\n"
             "    bare = false\n"
             "    logallrefupdates = true\n"
+            "    hooksPath = .githooks\n"
             "[remote \"origin\"]\n"
-            f"    url = https://oauth2:{tok}@git.nexus.internal/devops/nexus-deploy.git\n"
+            f"    url = https://oauth2:glpat-{tok}@git.nexus.internal/devops/nexus-deploy.git\n"
             "    fetch = +refs/heads/*:refs/remotes/origin/*\n"
+            f"    pushurl = https://oauth2:glpat-{tok}@git.nexus.internal/devops/nexus-deploy.git\n"
+            "[remote \"upstream\"]\n"
+            "    url = https://git.nexus.internal/platform/nexus-deploy-mirror.git\n"
+            "    fetch = +refs/heads/main:refs/remotes/upstream/main\n"
+            "[branch \"main\"]\n"
+            "    remote = origin\n"
+            "    merge = refs/heads/main\n"
+            "    rebase = true\n"
             "[credential]\n"
             "    helper = store\n"
+            "    helper = cache --timeout=3600\n"
+            "[user]\n"
+            "    name = deploy-bot\n"
+            "    email = deploy-bot@nexus.internal\n"
         ), "200", "text/plain"
+
+    if path.startswith("/.git/"):
+        # 只有 config 可读 (上面已处理), 其余 .git/* 一律 404 — 不暴露仓库结构
+        return (
+            '<!DOCTYPE html><html><head><title>404</title></head>'
+            f'<body><h1>404 Not Found</h1><p>{path} not found</p></body></html>'
+        ), "404", "text/html"
 
     if path == "/metrics":
         # 反射动作: Prometheus 端点 — build_info 给版本(与 CVE 因互证), target 给内网拓扑
@@ -627,6 +709,9 @@ async def handle_http_request(reader, writer, port: int = 8080):
                    body_prefix.decode("utf-8", errors="ignore"))
     except Exception:
         pass
+
+    # 时序拟真: 所有响应路径共享的延迟抖动 (μ=35ms σ=20ms 截断 [8,200ms])
+    await _timing_jitter()
 
     if _ip_blocked(client_ip):
         _record_request(sess_id or "blocked", client_ip, method, full_path,
@@ -1370,11 +1455,18 @@ async def handle_http_request(reader, writer, port: int = 8080):
         return
 
     # 正常响应
-    body, status, ctype = build_response(path, cm_result, sess_id, port)
+    body, status, ctype = build_response(path, cm_result, sess_id, port,
+                                         full_path=full_path)
 
     # 附加反制 Payload — 授权门控的 403 除外, 否则假凭证会越过验证墙直接泄露
     if cm_result and cm_result.success and status != "403":
         body += cm_result.response_payload
+
+    # 偶发错误 (时序拟真): 仅静态兜底路径 — 布设命中/授权阶梯/交付收割已在上方
+    # 各自 return, 不会经过这里, 反制归因不被稀释
+    _glitch = _occasional_gateway_error(status)
+    if _glitch:
+        body, status, ctype = _glitch
 
     # 载体响应头 (curl -i / 浏览器 devtools 均可见)
     extra = carrier_headers(f"http://127.0.0.1:{port}/api/auth")
@@ -1385,7 +1477,7 @@ async def handle_http_request(reader, writer, port: int = 8080):
         extra["Access-Control-Allow-Origin"] = _origin
         extra["Access-Control-Allow-Credentials"] = "true"
     extra_lines = "".join(f"{k}: {v}\r\n" for k, v in extra.items())
-    http_response = (
+    _head = (
         f"HTTP/1.1 {status} OK\r\n"
         f"Content-Type: {ctype}\r\n"
         f"Content-Length: {len(body.encode('utf-8'))}\r\n"
@@ -1394,10 +1486,20 @@ async def handle_http_request(reader, writer, port: int = 8080):
         + extra_lines
         + f"Set-Cookie: sid={sess_id}; Path=/\r\n"
         + "Connection: close\r\n\r\n"
-        + body
     )
-    writer.write(http_response.encode())
-    await writer.drain()
+    if TIMING_FAKE and status == "200" and path in TIMING_SLOW_ENDPOINTS:
+        # 慢端点拟真: 大数据端点分块渐进写 (块间 30-80ms, TTFB 与总时长有真实差)
+        _n = max(1, (len(body) + 3) // 4)          # 上取整 — 4 块恰好覆盖全文
+        _chunks = [body[i:i + _n] for i in range(0, len(body), _n)]
+        writer.write(_head.encode() + _chunks[0].encode("utf-8"))
+        await writer.drain()
+        for _c in _chunks[1:]:
+            await asyncio.sleep(random.uniform(0.03, 0.08))
+            writer.write(_c.encode("utf-8"))
+            await writer.drain()
+    else:
+        writer.write((_head + body).encode())
+        await writer.drain()
     writer.close()
     print_request_line(method, full_path, status)
 

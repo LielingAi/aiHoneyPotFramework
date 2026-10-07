@@ -126,14 +126,15 @@ class AuthBaitEngine:
 
     UNLOCKED_PATHS = {
         0: ["/api/auth"],
-        1: ["/.env", "/debug", "/api/query"],
-        2: ["/.env", "/debug", "/api/query", "/backup", "/api/internal"],
-        3: ["/.env", "/debug", "/api/query", "/backup", "/api/internal", "/admin", "/actuator"],
+        1: ["/.env.bak", "/debug", "/api/query"],
+        2: ["/.env.bak", "/debug", "/api/query", "/backup", "/api/internal"],
+        3: ["/.env.bak", "/debug", "/api/query", "/backup", "/api/internal", "/admin", "/actuator"],
         4: ["ALL"],
     }
 
     PATH_LEVEL_REQUIREMENTS = {
         "/.env": 1,
+        "/.env.bak": 1,              # env 真身 (根路径已迁移, 备份文件仍阶梯门控)
         "/debug": 1,
         "/backup": 2,
         "/api/backup/download": 4,   # env 格的报酬: 客户库快照 (密集金丝雀)
