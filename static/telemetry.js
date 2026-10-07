@@ -85,18 +85,18 @@
     return dW > 160 || dH > 160;
   }
 
-  /* ---------- periodic signal report (60s heartbeat + unload) ----------
-     静默心跳不落库: 信号无变化且页面隐藏 → 直接跳过 (实战 caught:
-     标签页开着时每 10s 一条 heartbeat 刷事件流, 一天 8640 条噪音) */
+  /* ---------- signal report: 事件驱动, 无心跳 ----------
+     轮询心跳是多余设计 (实战 caught: 唯一产出是刷库噪音; 取证关心
+     动作不关心存活)。信号显著变化才上报; 关闭时尽力发 session_end */
   var lastSig = "";
   function report(final) {
     var sig = [signals.mouse, signals.keys, signals.scroll,
                !!navigator.webdriver, devtoolsOpen()].join(",");
-    var silent = !final && sig === lastSig && document.hidden;
+    var changed = sig !== lastSig;
     lastSig = sig;
-    if (silent) return;
+    if (!final && !changed) return;
     beacon({
-      kind: final ? "session_end" : "heartbeat",
+      kind: final ? "session_end" : "signal",
       ms: Date.now() - started,
       mouse: signals.mouse, keys: signals.keys, scroll: signals.scroll,
       webdriver: !!navigator.webdriver,
@@ -106,6 +106,9 @@
       title: (document.title || "").slice(0, 80)
     });
   }
+
+  /* 变化检测循环 (5s 一轮, 只检测不发送; 有变化才触发 report) */
+  setInterval(report, 5000);
 
   /* ---------- 3. tag definitions poll (60s, same semantics as sensor cfg) ---------- */
   function pullDefs() {
@@ -123,7 +126,6 @@
 
   pullDefs();
   setInterval(pullDefs, 60000);
-  setInterval(function () { report(false); }, 60000);
   window.addEventListener("beforeunload", function () { report(true); });
 
   beacon({ kind: "session_start", url: location.href.slice(0, 200) });
