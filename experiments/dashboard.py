@@ -338,6 +338,15 @@ def _attackers(days: str) -> list:
 def _session_timeline(session_id: str) -> dict:
     """会话卷宗: 全部请求按时间排 + 每步判读 — 回答"发生了什么故事" """
     reqs = DB.query("SELECT * FROM requests WHERE session_id=? ORDER BY ts", (session_id,))
+    if not reqs:
+        # 容错: 手工输入易截断 (auto_+16hex=21位), 前缀匹配唯一候选
+        cand = DB.query("SELECT DISTINCT session_id FROM requests "
+                        "WHERE session_id LIKE ? ORDER BY session_id LIMIT 2",
+                        (session_id + "%",))
+        if len(cand) == 1:
+            session_id = cand[0]["session_id"]
+            reqs = DB.query("SELECT * FROM requests WHERE session_id=? ORDER BY ts",
+                            (session_id,))
     intel = DB.query("SELECT * FROM intel WHERE session_id=? ORDER BY ts", (session_id,))
     if not reqs and not intel:
         return {"session_id": session_id, "steps": [], "intel": []}
