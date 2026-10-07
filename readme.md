@@ -146,15 +146,26 @@ static/js/app.js         路由 (hash) / 分组导航 / 全局筛选 / ⌘K 命�
 
 ---
 
-## 📊 研究数据面板
+## 📊 产品化界面
 
-零依赖中文面板（stdlib 单文件）——每一次在环试验实时落库可查：`py -3.13 experiments/dashboard.py --db experiments/results/testdb.sqlite --port 8899`| 指标总览 · 操作者归因 · 汇总指标 |
+零依赖中文控制台（前后端分离 SPA，stdlib 单文件后端）——每一次反制实时落库可查：`py -3.13 experiments/dashboard.py --db experiments/results/testdb.sqlite --port 8899`
+
+| 武器库 · 反制知识档案（效能徽标实时归因） | 会话卷宗 · 攻击故事（POST 数据可展开） |
+|---|---|
+| ![武器库](docs/images/product_arsenal.png) | ![会话卷宗](docs/images/product_sessions.png) |
+
+| 指挥台 · 任务下发通道 | 事件流 · 请求日志 |
+|---|---|
+| ![指挥台](docs/images/product_tasking.png) | ![事件流](docs/images/product_events.png) |
+
+- **武器库**: vuln=利用方案知识档案(程序/原语/payload模板/成功判据) · exp=反制利用链(集合/顺序) · 三步向导零 JSON · 布设命中/链推进实时徽标
+- **会话卷宗**: 一个攻击者从进入到触雷的完整故事 · 差分探针清醒度判定(awake/hypnotized)
+- **指挥台**: L4 校准期会话的任务下发 — tasking 通道实战: agent 执行命令并上交环境
+- **事件流**: 蜜罐服务端视角全量请求 · POST 数据块可回看 · 搜索含 body
+
+| 指标总览与操作者归因 · 汇总指标（研究视角） |
 |---|
 | ![指标总览与操作者归因](docs/images/dashboard-metrics.png) |
-
-| 试验明细（三维筛选 + 全文搜索） | 情报分级（五档证据） |
-|---|---|
-| ![试验明细](docs/images/dashboard-trials.png) | ![情报分级](docs/images/dashboard-intel.png) |
 
 - **指标总览**: 发现攻击耗时 / 真外泄率 / 注入服从率 / 预算放大倍数 / 误报率 / 情报产出 —— 与 `analyze.py kpi` 同口径
 - **操作者归因**: 跨会话聚类——攻击方泄漏的主机名/用户名/内网地址自动归并为 threat-actor
