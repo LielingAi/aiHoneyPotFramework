@@ -2366,7 +2366,7 @@ class TestProductP2:
         db = TestDB(str(tmp_path / "ars.sqlite"))
         ars = Arsenal(db)
         ws = ars.list()
-        assert len(ws) == 9 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
+        assert len(ws) == 10 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
         assert any(w["id"] == "W-PROMPT-CERT-1" and w["mount"] == "ladder"
                    for w in ws)
         # 激活分片武器
@@ -2395,8 +2395,10 @@ class TestProductP2:
         assert any(w["id"] == "W-C2-STAGE2-1" for w in c2w)
 
     def test_arsenal_v2_entities(self, tmp_path):
-        """arsenal v2 实体化: 种子含 2 vuln + 2 exp 实体, exp_refs 互相关联,
-        现有 prompt 武器自动 class, 旧库行 (无 class 字段) 读时按 type 派生"""
+        """arsenal v3 知识本体: 种子含 3 vuln 知识档案 + 2 exp 链, exp_refs 互相关联,
+        vuln 本体字段 (program/primitive/source) 与投送配置 (deploy) 分离,
+        纯知识档案可不布设 (VULN-RCE-ACTUATOR 无 deploy), prompt 种子带 craft 块,
+        旧库行 (无 class 字段) 读时按 type 派生"""
         from core.arsenal import Arsenal
         from core.testdb import TestDB
         db = TestDB(str(tmp_path / "ars_v2.sqlite"))
@@ -2405,26 +2407,41 @@ class TestProductP2:
         ids = {w["id"] for w in ws}
         vulns = {w["id"]: w for w in ws if w.get("class") == "vuln"}
         exps = {w["id"]: w for w in ws if w.get("class") == "exp"}
-        # 4 个新实体: 2 漏洞 + 2 利用链
+        # 5 个实体: 3 漏洞知识档案 + 2 利用链
         assert "VULN-TRAVERSAL-28413" in vulns and "VULN-SQLI-QUERY" in vulns
+        assert "VULN-RCE-ACTUATOR" in vulns
         assert "EXP-TRAVERSAL-READ" in exps and "EXP-SQLI-HARVEST" in exps
-        # vuln 实体结构
+        # vuln 知识档案 v3 本体字段
         v = vulns["VULN-TRAVERSAL-28413"]["vuln"]
-        assert v["component"] and v["trigger"]["path"] == "/api/files"
-        assert v["cve_id"] == "CVE-2026-28413" and v["affected_version"] == "2.4.1"
+        assert v["program"] == "nexus-gateway"
+        assert v["deploy"]["world_endpoint"] == "/api/files"
+        assert v["cve_id"] == "CVE-2026-28413" and v["affected_versions"] == "2.4.1"
+        assert v["primitive"] == "read" and v["source"] == "research"
+        assert v["trigger_conditions"] and v["payload_template"] and v["success_criteria"]
+        # 知识可以不布设: RCE 档案无 deploy, 纯检测知识
+        assert "deploy" not in vulns["VULN-RCE-ACTUATOR"]["vuln"]
+        assert vulns["VULN-RCE-ACTUATOR"]["vuln"]["primitive"] == "rce"
+        assert vulns["VULN-RCE-ACTUATOR"]["vuln"]["cve_id"] == "CVE-2022-22965"
         # exp_refs 互相关联
         assert "EXP-TRAVERSAL-READ" in v["exp_refs"]
         assert "EXP-SQLI-HARVEST" in vulns["VULN-SQLI-QUERY"]["vuln"]["exp_refs"]
-        # exp 实体: targets_vuln 指向存在的 vuln, stages 结构完整
+        # exp 实体: targets_vuln 指向存在的 vuln, objective + stages 结构完整
         for e in exps.values():
             exp = e["exp"]
             assert exp["targets_vuln"] in ids
+            assert exp["objective"] in ("控制", "数据", "提示词")
             assert len(exp["stages"]) >= 3
             for s in exp["stages"]:
                 assert s["name"] and s["primitive"] and s["delivery_object"]
             assert exp["success_effect"] in ("env", "prompt", "credentials", "beacon")
         assert exps["EXP-TRAVERSAL-READ"]["exp"]["success_effect"] == "env"
         assert exps["EXP-SQLI-HARVEST"]["exp"]["success_effect"] == "credentials"
+        # prompt 种子带 craft 话术本体块 (含 SEED 尾部 W-JS-BAIT-1)
+        prompts = {w["id"]: w for w in ws if w.get("class") == "prompt"}
+        for w in prompts.values():
+            assert w["craft"]["goal"] in ("窃取提示词", "核实授权", "服从引导")
+            assert w["craft"]["approach"]
+        assert prompts["W-JS-BAIT-1"]["craft"]["goal"] == "服从引导"
         # 现有 prompt 武器自动 class="prompt" (v2 种子显式带 class)
         assert all(w.get("class") == "prompt" for w in ws
                    if w["id"].startswith("W-PROMPT"))
@@ -2439,6 +2456,70 @@ class TestProductP2:
         assert '"class": "prompt"' in db.query(
             "SELECT json FROM arsenal WHERE weapon_id='W-LEGACY-X'")[0]["json"]
 
+    def test_arsenal_v2_legacy_row_mapping(self, tmp_path):
+        """v2 旧行读时自动映射 v3 派生字段: trigger→deploy/trigger_conditions,
+        affected_version→affected_versions, component→program (派生不落库)"""
+        import time
+        from core.arsenal import Arsenal
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "ars_legacy.sqlite"))
+        ars = Arsenal(db)
+        legacy = {"id": "VULN-LEGACY-1", "name": "旧档案", "class": "vuln",
+                  "type": "vuln", "stage": "sensor", "mount": "delivery",
+                  "enabled": False, "payload": "p",
+                  "vuln": {"component": "legacy-app", "cve_id": "CVE-2020-1",
+                           "affected_version": "1.2.3",
+                           "trigger": {"path": "/legacy", "pattern": "id 含 SQLi"},
+                           "behavior_note": "b", "exp_refs": []}}
+        with db._conn() as c:
+            c.execute("INSERT OR REPLACE INTO arsenal VALUES (?,?,?)",
+                      (legacy["id"], json.dumps(legacy, ensure_ascii=False),
+                       time.time()))
+        w = ars.get("VULN-LEGACY-1")
+        v = w["vuln"]
+        assert v["program"] == "legacy-app"                    # component → program
+        assert v["affected_versions"] == "1.2.3"               # 单数 → 复数
+        assert v["trigger_conditions"] == "id 含 SQLi"          # trigger.pattern → 条件
+        assert v["deploy"]["world_endpoint"] == "/legacy"       # trigger.path → 布设
+        # 派生不落库: 原始 json 仍是 v2 字段
+        raw = db.query("SELECT json FROM arsenal WHERE weapon_id='VULN-LEGACY-1'")[0]["json"]
+        assert "affected_versions" not in raw and '"deploy"' not in raw
+        # 下发通道 (push_payload 经 list→_norm) 推出去的是已映射形态
+        ars.set_enabled("VULN-LEGACY-1", True)
+        pushed = json.loads(ars.push_payload())
+        pv = next(x for x in pushed if x["id"] == "VULN-LEGACY-1")["vuln"]
+        assert pv["program"] == "legacy-app"
+        assert pv["deploy"]["world_endpoint"] == "/legacy"
+
+    def test_arsenal_seed_v3_overwrite(self, tmp_path):
+        """种子版本机制: SEED_VERSION 存 settings; 版本变化时同 id 种子覆盖更新
+        (用户改动被出厂值覆盖), 用户自建武器 (非种子 id) 不碰"""
+        from core.arsenal import Arsenal, SEED_VERSION
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "ars_seed.sqlite"))
+        ars = Arsenal(db)
+        assert db.get_setting("arsenal_seed_version") == SEED_VERSION == "v3"
+        # 用户改动种子 (关闭) + 自建武器
+        assert ars.set_enabled("W-PROMPT-PROV-1", False)
+        ars.save({"id": "W-USER-1", "type": "prompt", "stage": "sensor",
+                  "mount": "ladder", "payload": "user weapon", "enabled": True})
+        # 同版本重init: INSERT OR IGNORE — 用户改动保留
+        Arsenal(db)
+        assert ars.get("W-PROMPT-PROV-1")["enabled"] is False
+        # 模拟版本变化 (v2 库升级): 种子覆盖回出厂值, 用户武器不动
+        db.set_setting("arsenal_seed_version", "v2")
+        ars2 = Arsenal(db)
+        assert db.get_setting("arsenal_seed_version") == "v3"
+        seed = ars2.get("W-PROMPT-PROV-1")
+        assert seed["enabled"] is True                  # 种子被覆盖更新
+        assert seed["craft"]["goal"] == "核实授权"        # v3 craft 块就位
+        js = ars2.get("W-JS-BAIT-1")
+        assert js["craft"]["goal"] and js["craft"]["approach"]
+        rce = ars2.get("VULN-RCE-ACTUATOR")
+        assert rce["vuln"]["primitive"] == "rce" and "deploy" not in rce["vuln"]
+        user = ars2.get("W-USER-1")
+        assert user["enabled"] is True and user["payload"] == "user weapon"
+
     def test_arsenal_api_and_sensor_config(self, tmp_path):
         """hive 端点: /api/arsenal CRUD + /api/sensor_config 携带 arsenal_active"""
         import urllib.request
@@ -2450,7 +2531,7 @@ class TestProductP2:
             with op.open(urllib.request.Request(url + "/api/arsenal?token=m-tok"),
                          timeout=5) as r:
                 ws = json.loads(r.read())
-            assert len(ws) == 9
+            assert len(ws) == 10
             assert any(w["id"] == "W-PROMPT-CERT-1" for w in ws)
             assert any(w.get("class") == "vuln" and w["id"] == "VULN-TRAVERSAL-28413"
                        for w in ws)
@@ -2524,7 +2605,14 @@ class TestProductP2:
                      "vuln": {"trigger": {"path": "/x"}}},
                     {"id": "W-VULN-BAD2", "payload": "p", "class": "vuln",
                      "type": "vuln", "stage": "sensor", "mount": "delivery",
-                     "vuln": {"component": "c", "trigger": {}}},
+                     "vuln": {"program": "p", "trigger": {}}},          # 缺 primitive/source
+                    {"id": "W-VULN-BAD3", "payload": "p", "class": "vuln",
+                     "type": "vuln", "stage": "sensor", "mount": "delivery",
+                     "vuln": {"program": "p", "primitive": "fly", "source": "research"}},
+                    {"id": "W-VULN-BAD4", "payload": "p", "class": "vuln",
+                     "type": "vuln", "stage": "sensor", "mount": "delivery",
+                     "vuln": {"program": "p", "primitive": "read", "source": "research",
+                              "deploy": {"world_endpoint": " "}}},       # deploy 端点为空串
                     {"id": "W-EXP-BAD", "payload": "p", "class": "exp",
                      "type": "vuln", "stage": "sensor", "mount": "delivery",
                      "exp": {"targets_vuln": "VULN-SQLI-QUERY", "stages": []}},
@@ -2532,6 +2620,11 @@ class TestProductP2:
                      "type": "vuln", "stage": "sensor", "mount": "delivery",
                      "exp": {"targets_vuln": "VULN-SQLI-QUERY",
                              "stages": [{"name": "s", "primitive": "fly",
+                                         "delivery_object": "output"}]}},
+                    {"id": "W-EXP-BAD3", "payload": "p", "class": "exp",
+                     "type": "vuln", "stage": "sensor", "mount": "delivery",
+                     "exp": {"targets_vuln": "VULN-SQLI-QUERY", "objective": "破坏",
+                             "stages": [{"name": "s", "primitive": "read",
                                          "delivery_object": "output"}]}}):
                 st, j = post({"action": "save", "weapon": bad})
                 assert st == 400 and "error" in j, f"应 400: {bad['id']}"
@@ -2539,14 +2632,22 @@ class TestProductP2:
             st, j = post({"action": "save", "weapon": {
                 "id": "W-VULN-TEST-1", "payload": "p", "class": "vuln",
                 "type": "vuln", "stage": "sensor", "mount": "delivery",
-                "vuln": {"component": "c", "cve_id": "CVE-2099-1",
-                         "trigger": {"path": "/p", "pattern": "pat"},
+                "vuln": {"program": "p", "cve_id": "CVE-2099-1",
+                         "primitive": "read", "source": "research",
+                         "confidence": "confirmed",
+                         "deploy": {"world_endpoint": "/p"},
                          "behavior_note": "b", "exp_refs": []}}})
+            assert st == 200 and j["ok"]
+            st, j = post({"action": "save", "weapon": {          # 不布设纯知识 → 合法
+                "id": "W-VULN-TEST-2", "payload": "p", "class": "vuln",
+                "type": "vuln", "stage": "sensor", "mount": "delivery",
+                "vuln": {"program": "p2", "primitive": "rce", "source": "feed"}}})
             assert st == 200 and j["ok"]
             st, j = post({"action": "save", "weapon": {
                 "id": "W-EXP-TEST-1", "payload": "p", "class": "exp",
                 "type": "vuln", "stage": "sensor", "mount": "delivery",
-                "exp": {"targets_vuln": "W-VULN-TEST-1", "success_effect": "env",
+                "exp": {"targets_vuln": "W-VULN-TEST-1", "objective": "数据",
+                        "success_effect": "env",
                         "stages": [{"name": "s1", "primitive": "read",
                                     "delivery_object": "content",
                                     "condition": "c", "payload": "x"}]}}})

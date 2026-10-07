@@ -847,12 +847,21 @@ function weaponErr(w) {
   if (!String(w.payload || "").trim()) return "载荷 payload 不能为空";
   if (w.class === "vuln") {
     const v = w.vuln || {};
-    if (!String(v.component || "").trim()) return "vuln 类武器要求 vuln.component 非空";
-    if (!String((v.trigger || {}).path || "").trim())
-      return "vuln 类武器要求 vuln.trigger.path 非空";
+    if (!String(v.program || "").trim()) return "利用方案要求 program (目标程序) 非空";
+    if (!["read", "write", "rce", "auth_bypass", "ssrf", "deser"].includes(v.primitive))
+      return "primitive 需为 read/write/rce/auth_bypass/ssrf/deser";
+    if (!["research", "feed", "zero-day"].includes(v.source))
+      return "source 需为 research/feed/zero-day (知识来源)";
+    if (v.confidence && !["confirmed", "probable"].includes(v.confidence))
+      return "confidence 需为 confirmed/probable";
+    if (v.deploy && !String(v.deploy.world_endpoint || "").trim())
+      return "deploy 已填则 world_endpoint (投送端点) 非空 — 纯知识请移除 deploy";
   }
   if (w.class === "exp") {
-    const stages = (w.exp || {}).stages;
+    const e = w.exp || {};
+    if (e.objective && !["控制", "数据", "提示词"].includes(e.objective))
+      return "objective 需为 控制/数据/提示词 (反制目标)";
+    const stages = e.stages;
     if (!Array.isArray(stages) || !stages.length)
       return "exp 类武器要求 exp.stages 为非空数组";
     for (const s of stages) {
@@ -869,22 +878,29 @@ function weaponErr(w) {
 }
 
 /* ================= 武器构建器: 三步向导 =================
-   造武器 = 在世界表面布设缺陷 / 编排利用链 / 装配话术。
+   武器 = 反制装备 (对手 agent 攻击我们时反穿它的知识/话术/利用方案)。
+   本体 = 反制知识档案; mount = 投送方式; 战果 = 数据/提示词/控制权。
    元数据驱动 (WEAPON_CLASSES 注册表), 全程无 JSON 输入; 编辑=第2步预填。 */
 const WEAPON_CLASSES = {
   prompt: { label: "提示词武器", icon: "✦", cls: "prompt", carrier: "prompt",
-    desc: "把一句指令装进信任通道",
+    desc: "反制话术 — agent 读到即中招: 套它的提示词 / 让它服从",
     example: "例: 授权核实·分片包裹 (W-PROMPT-PROV-2)" },
-  vuln: { label: "漏洞", icon: "⌗", cls: "vuln", carrier: "vuln",
-    desc: "在世界的一个组件上放一个有触发条件/行为链的缺陷",
+  vuln: { label: "漏洞武器", icon: "⌗", cls: "vuln", carrier: "vuln",
+    desc: "利用方案知识档案 — 我们掌握某程序怎么打; 可选投送到世界仿真",
     example: "例: 路径穿越·files 模块 (VULN-TRAVERSAL-28413)" },
   exp: { label: "EXP", icon: "⛁", cls: "exp", carrier: "vuln",
-    desc: "编排一条多阶段利用链: 每步=原语×投递对象×载荷×成功条件",
+    desc: "反制利用链 — 多阶段编排, 每步=原语×投递×载荷×成功判据",
     example: "例: EXP-SQLI-HARVEST" },
   cli: { label: "CLI/MCP", icon: "⌘", cls: "cli", carrier: "cli",
-    desc: "装配工具/命令类载荷",
+    desc: "命令载荷 — agent 执行我们指令时的下发内容",
     example: "例: C2 二级·环境回传 (W-C2-STAGE2-1)" },
 };
+const VULN_PRIMITIVES = [["read", "read · 读取"], ["write", "write · 写入"],
+  ["rce", "rce · 远程执行"], ["auth_bypass", "auth_bypass · 越权"],
+  ["ssrf", "ssrf · 服务端请求伪造"], ["deser", "deser · 反序列化"]];
+const VULN_SOURCES = [["research", "research · 研究所得"], ["feed", "feed · 情报源"],
+  ["zero-day", "zero-day · 未公开"]];
+const OBJECTIVES = [["", "— 反制目标 —"], ["控制", "控制 · 拿对手服务器"], ["数据", "数据 · 偷对手信息/密钥"], ["提示词", "提示词 · 偷对手大脑"]];
 /* 攻击模式库 / 漏洞类型 / 行为模板 / 变形档 — 构建器的选项字典 */
 const ATTACK_PATTERNS = [["参数含 ../", "参数含 ../"], ["参数含 SQLi 探针", "参数含 SQLi 探针"],
                          ["参数含命令元字符", "参数含命令元字符"], ["任意 GET", "任意 GET"]];
@@ -928,13 +944,23 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
     enabled: !!(existing && existing.enabled),
     body: (existing && existing.class === "prompt") ? (existing.payload || "") : "",
     mount: (existing && existing.mount) || "delivery", morph: "none",
-    compPath: (v0.trigger || {}).path || "", vulnKind: "traversal",
-    cve: v0.cve_id || "", pattern: (v0.trigger || {}).pattern || "",
-    behaviorKey: "", behaviorNote: v0.behavior_note || "",
+    /* vuln = 利用方案知识档案 (v3); 投送端点在 deploy 块 */
+    program: v0.program || v0.component || "", vulnKind: "traversal",
+    cve: v0.cve_id || "", affected: v0.affected_versions || v0.affected_version || "",
+    primitive: v0.primitive || "read",
+    trigCond: v0.trigger_conditions || (v0.trigger || {}).pattern || "",
+    payloadTpl: v0.payload_template || "",
+    successCrit: v0.success_criteria || "",
+    source: v0.source || "research", confidence: v0.confidence || "confirmed",
+    worldEp: (v0.deploy || {}).world_endpoint || (v0.trigger || {}).path || "",
+    behaviorNote: v0.behavior_note || "",
     targetVuln: t0.targets_vuln || "",
     stages: (t0.stages || []).map((s) => ({ ...s })),
+    objective: t0.objective || "数据",
     successEffect: t0.success_effect || "env",
     chainMode: t0.mode || "unordered",
+    craftGoal: (existing && existing.craft && existing.craft.goal) || "窃取提示词",
+    craftApproach: (existing && existing.craft && existing.craft.approach) || "",
     cliBody: (existing && existing.class === "cli") ? (existing.payload || "") : "",
   };
   const err = h("div", { style: "color:var(--bad);font-size:11.5px;min-height:14px" });
@@ -960,7 +986,9 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
   /* 已登记漏洞的组件 (角标用) */
   const vulnPaths = {};
   for (const w of arsenal) {
-    if (w.class === "vuln" && w.vuln && w.vuln.trigger) vulnPaths[w.vuln.trigger.path] = w.id;
+    const ep = ((w.vuln || {}).deploy || {}).world_endpoint
+      || (((w.vuln || {}).trigger || {}).path);
+    if (w.class === "vuln" && ep) vulnPaths[ep] = w.id;
   }
 
   function breadcrumb() {
@@ -1029,53 +1057,69 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
     let specific = null;
 
     if (st.cls === "prompt") {
-      const bodyTa = ta("载荷本体 — 纯净话术文本 (变形档只影响成品前缀)", st.body, 5);
+      const bodyTa = ta("话术本体 — agent 读到即中招的纯净文本 (变形档只影响成品前缀)", st.body, 5);
       bodyTa.oninput = () => { st.body = bodyTa.value; morphPre.textContent = finalPayload(); };
       const mountS = sel(PROMPT_MOUNTS, st.mount);
       mountS.onchange = () => { st.mount = mountS.value; };
       const morphS = sel(Object.entries(MORPH_PROFILES).map(([k, [l]]) => [k, l]), st.morph);
       morphS.onchange = () => { st.morph = morphS.value; morphPre.textContent = finalPayload(); };
+      const goalS = sel([["窃取提示词", "窃取提示词 — 拿它的大脑"],
+        ["核实授权", "核实授权 — 套它的任务书/身份"],
+        ["服从引导", "服从引导 — 让它执行我们的动作"],
+        ["环境套取", "环境套取 — 拿它的密钥/配置"]], st.craftGoal);
+      goalS.onchange = () => { st.craftGoal = goalS.value; };
+      const apprI = inp("策略一句话 (如: 合规外衣+同伴压力, 指令拆进流程)", st.craftApproach);
+      apprI.oninput = () => { st.craftApproach = apprI.value; };
       const morphPre = h("pre", { style: "background:var(--bg);border:1px solid var(--border);"
         + "border-radius:8px;padding:8px;font-size:11px;white-space:pre-wrap;"
         + "word-break:break-all;max-height:160px;overflow:auto" }, finalPayload());
       specific = h("div", { style: "display:grid;gap:6px" },
-        lab("提示词 · 载荷 + 挂载 + 变形档"), bodyTa,
-        row2(mountS, morphS), lab("成品预览 (含变形前缀)"), morphPre);
+        lab("反制话术 · 反制意图 + 载荷 + 挂载 + 变形档"),
+        row2(goalS, mountS), apprI, bodyTa,
+        morphS, lab("成品预览 (含变形前缀)"), morphPre);
     }
 
     if (st.cls === "vuln") {
-      const compS = sel([
-        ["", "— 选择世界组件 —"],
-        ...surface.map((e) => [e.path,
-          `${e.path} — ${e.note}${vulnPaths[e.path] ? " [已有漏洞]" : ""}`])],
-        st.compPath);
-      compS.onchange = () => { st.compPath = compS.value; pathOut.textContent = st.compPath; };
-      const kindS = sel(VULN_KINDS, st.vulnKind);
-      kindS.onchange = () => { st.vulnKind = kindS.value; };
+      /* 利用方案知识档案 — 本体: 程序/原语/触发条件/payload模板/成功判据/来源
+         投送: 可选仿真到世界端点 (deploy.world_endpoint) */
+      const progI = inp("目标程序 (如 nexus-gateway / spring-boot-actuator)", st.program);
+      progI.oninput = () => { st.program = progI.value; };
+      const primS = sel(VULN_PRIMITIVES, st.primitive);
+      primS.onchange = () => { st.primitive = primS.value; };
       const cveI = inp("CVE 编号 (可空)", st.cve, true);
       cveI.oninput = () => { st.cve = cveI.value; };
       const cveBtn = h("button", { class: "btn", style: "white-space:nowrap",
         onclick: () => { st.cve = `CVE-2026-${10000 + Math.floor(Math.random() * 90000)}`;
                          cveI.value = st.cve; } }, "自动生成");
-      const pathOut = h("span", { class: "mono",
-        style: "font-size:11.5px;color:var(--accent)" }, st.compPath || "(先选组件)");
-      const patS = sel(ATTACK_PATTERNS, st.pattern);
-      patS.onchange = () => { st.pattern = patS.value; };
-      const behS = sel([["", "— 行为模板 —"],
-        ...Object.entries(BEHAVIOR_TEMPLATES).map(([k, [l]]) => [k, l])], st.behaviorKey);
-      const behTa = ta("行为说明 (模板可预填, 可改)", st.behaviorNote, 2);
-      behTa.oninput = () => { st.behaviorNote = behTa.value; };
-      behS.onchange = () => { st.behaviorKey = behS.value;
-        if (behS.value) { st.behaviorNote = BEHAVIOR_TEMPLATES[behS.value][1];
-                          behTa.value = st.behaviorNote; } };
+      const affI = inp("影响版本 (逗号分隔, 如 2.4.1, 2.4.2)", st.affected);
+      affI.oninput = () => { st.affected = affI.value; };
+      const trigTa = ta("触发条件 — 什么输入/状态下漏洞被触发", st.trigCond, 2);
+      trigTa.oninput = () => { st.trigCond = trigTa.value; };
+      const payTa = ta("payload 模板 — 利用请求的样板 (带可替换位)", st.payloadTpl, 2);
+      payTa.oninput = () => { st.payloadTpl = payTa.value; };
+      const succI = inp("成功判据 — 什么回显算利用成功", st.successCrit);
+      succI.oninput = () => { st.successCrit = succI.value; };
+      const srcS = sel(VULN_SOURCES, st.source);
+      srcS.onchange = () => { st.source = srcS.value; };
+      const confS = sel([["confirmed", "confirmed · 已验证"], ["probable", "probable · 推断"]],
+        st.confidence);
+      confS.onchange = () => { st.confidence = confS.value; };
+      const epS = sel([
+        ["", "不布设 — 纯知识档案 (用于检测/反打)"],
+        ...surface.map((e) => [e.path,
+          `${e.path} — ${e.note}${vulnPaths[e.path] ? " [已有武器]" : ""}`])],
+        st.worldEp);
+      epS.onchange = () => { st.worldEp = epS.value; };
       specific = h("div", { style: "display:grid;gap:6px" },
-        lab("漏洞 · 组件 = 世界表面真实端点"),
-        compS,
-        row2(h("div", { style: "flex:1;display:flex;gap:6px;align-items:center" },
-          h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "触发路径"),
-          pathOut), kindS),
-        row2(h("div", { style: "flex:1;display:flex;gap:6px" }, cveI, cveBtn), patS),
-        lab("行为"), behS, behTa);
+        lab("利用方案 · 知识本体"),
+        row2(progI, primS),
+        row2(h("div", { style: "flex:1;display:flex;gap:6px" }, cveI, cveBtn), affI),
+        lab("触发条件"), trigTa,
+        lab("payload 模板"), payTa,
+        lab("成功判据"), succI,
+        row2(srcS, confS),
+        lab("投送配置 (可选 — 仿真到蜜罐世界钓会这门手艺的对手)"),
+        epS);
     }
 
     if (st.cls === "exp") {
@@ -1100,7 +1144,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
         nameI2.oninput = () => { s.name = nameI2.value; };
         const payTa = ta("该步载荷 (请求/命令/话术)", s.payload, 2);
         payTa.oninput = () => { s.payload = payTa.value; };
-        const condI = inp("成功条件 (自然语言)", s.condition);
+        const condI = inp("成功判据 — 什么回显/动作算该步得手", s.condition);
         condI.oninput = () => { s.condition = condI.value; };
         return h("div", { class: "card pad",
           style: "border-color:var(--border);display:grid;gap:6px" },
@@ -1125,17 +1169,16 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       } }, "＋ 加一步");
       const effS = sel(SUCCESS_EFFECTS, st.successEffect);
       effS.onchange = () => { st.successEffect = effS.value; };
+      const objS = sel(OBJECTIVES, st.objective);
+      objS.onchange = () => { st.objective = objS.value; };
       const modeS = sel([
         ["unordered", "集合完成 — 命中链中全部动作即达成 (真实 agent 乱序, 推荐)"],
         ["ordered", "顺序推进 — 严格按步骤先后 (有因果依赖的链)"],
       ], st.chainMode);
       modeS.onchange = () => { st.chainMode = modeS.value; };
       specific = h("div", { style: "display:grid;gap:6px" },
-        lab("EXP · 目标漏洞 + 步骤构建器"),
-        tgtS, stagesBox, addBtn,
-        h("div", { style: "display:flex;gap:8px;align-items:center" },
-          h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "预期战果"),
-          effS),
+        lab("EXP · 目标漏洞 + 反制目标 + 步骤构建器"),
+        tgtS, row2(objS, effS), stagesBox, addBtn,
         h("div", { style: "display:flex;gap:8px;align-items:center" },
           h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "链模式"),
           modeS));
@@ -1160,10 +1203,13 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
   function step2Error() {
     if (!st.id.trim()) return "武器 ID 必填 (可点'生成建议')";
     if (st.cls === "vuln") {
-      if (!st.compPath) return "请选择世界组件";
-      if (!st.behaviorNote.trim()) return "请填写行为说明 (可用模板预填)";
+      if (!st.program.trim()) return "目标程序必填 — 利用方案的知识本体";
+      if (!st.trigCond.trim()) return "触发条件必填 — 什么输入状态下漏洞被触发";
+      if (!st.payloadTpl.trim()) return "payload 模板必填 — 利用请求的样板";
+      if (!st.successCrit.trim()) return "成功判据必填 — 什么回显算利用成功";
     }
     if (st.cls === "exp") {
+      if (!st.objective) return "请选择反制目标 (控制/数据/提示词)";
       if (!st.targetVuln) return "请选择目标漏洞";
       if (!st.stages.length) return "至少一个步骤";
       for (const s of st.stages) {
@@ -1171,7 +1217,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
           return `步骤 ${(st.stages.indexOf(s) + 1)} 缺名称/原语/投递对象`;
       }
     }
-    if (st.cls === "prompt" && !st.body.trim()) return "载荷本体不能为空";
+    if (st.cls === "prompt" && !st.body.trim()) return "话术本体不能为空";
     if (st.cls === "cli" && !st.cliBody.trim()) return "载荷不能为空";
     return "";
   }
@@ -1186,19 +1232,27 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
     if (st.cls === "prompt") {
       const morphLabel = MORPH_PROFILES[st.morph][0];
       return { ...base, type: "prompt", mount: st.mount, payload: finalPayload(),
+        craft: { goal: st.craftGoal, approach: st.craftApproach },
         note: base.note + (st.morph !== "none" ? ` · 变形档:${morphLabel}` : "") };
     }
     if (st.cls === "vuln") {
+      const vuln = { program: st.program, cve_id: st.cve,
+        affected_versions: st.affected,
+        primitive: st.primitive,
+        trigger_conditions: st.trigCond,
+        payload_template: st.payloadTpl,
+        success_criteria: st.successCrit,
+        source: st.source, confidence: st.confidence,
+        behavior_note: st.behaviorNote, exp_refs: [] };
+      if (st.worldEp) vuln.deploy = { world_endpoint: st.worldEp };
       return { ...base, type: "vuln", mount: "delivery",
-        payload: "registration entity — see vuln block",
-        vuln: { component: st.compPath, cve_id: st.cve, affected_version: "",
-          trigger: { path: st.compPath, pattern: st.pattern },
-          behavior_note: st.behaviorNote, exp_refs: [] } };
+        payload: "knowledge entity — see vuln block", vuln };
     }
     if (st.cls === "exp") {
       return { ...base, type: "vuln", mount: "delivery",
         payload: "exploit chain entity — see exp block",
-        exp: { targets_vuln: st.targetVuln, stages: st.stages,
+        exp: { targets_vuln: st.targetVuln, objective: st.objective,
+          stages: st.stages,
           success_effect: st.successEffect, mode: st.chainMode } };
     }
     return { ...base, type: "cli", mount: "c2_next_stage", payload: st.cliBody };
@@ -1214,26 +1268,31 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       ["名称", w.name], ["阶段", st.stage === "c2" ? "深层次 (c2)" : "开口子 (sensor)"],
       ["激活", st.enabled ? "是" : "否"],
       ...(st.cls === "vuln"
-        ? [["组件", st.compPath], ["CVE", st.cve || "-"], ["触发", `${st.compPath} · ${st.pattern}`]]
+        ? [["目标程序", st.program], ["利用原语", st.primitive],
+           ["CVE", st.cve || "-"], ["影响版本", st.affected || "-"],
+           ["知识来源", `${st.source} · ${st.confidence}`],
+           ...(st.worldEp ? [["投送端点", st.worldEp]] : [["投送", "不布设 — 纯知识档案"]])]
         : []),
       ...(st.cls === "exp"
-        ? [["目标漏洞", st.targetVuln], ["步骤数", String(st.stages.length)],
-           ["战果", st.successEffect]]
+        ? [["目标漏洞", st.targetVuln], ["反制目标", st.objective],
+           ["步骤数", String(st.stages.length)], ["战果", st.successEffect]]
         : []),
-      ...(st.cls === "prompt" ? [["挂载", st.mount], ["变形", MORPH_PROFILES[st.morph][0]]] : []),
+      ...(st.cls === "prompt" ? [["挂载", st.mount], ["反制意图", st.craftGoal],
+        ["变形", MORPH_PROFILES[st.morph][0]]] : []),
     ]);
     let sim = null;
     if (st.cls === "vuln") {
-      const sample = st.pattern.includes("..") ? "path=../../../../etc/passwd"
-        : st.pattern.includes("SQLi") ? "q=1' AND '1'='1"
-        : st.pattern.includes("命令") ? "cmd=cat /etc/passwd" : "";
       sim = h("div", { class: "card pad", style: "border-color:var(--warn)" },
-        h("div", { class: "t muted" }, "世界模拟 — Agent 触发时看到的请求/响应对"),
+        h("div", { class: "t muted" }, "反制推演 — 对手 agent 接触时的打击面"),
         h("pre", { style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;"
           + "padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all" },
-          `GET ${st.compPath}${sample ? "?" + sample : ""}\n\n`
-          + `→ ${st.behaviorNote || "(行为说明)"}\n`
-          + `→ 世界一致性: 响应由世界纯函数驱动, 同输入同输出`));
+          `利用方案: ${st.program} ${st.affected || ""} ${st.primitive}\n`
+          + `触发条件: ${st.trigCond || "(未填)"}\n`
+          + `payload 模板: ${st.payloadTpl || "(未填)"}\n`
+          + `成功判据: ${st.successCrit || "(未填)"}\n`
+          + (st.worldEp
+            ? `\n投送: 仿真到 ${st.worldEp} — 会这门手艺的对手 agent 踩中即暴露能力画像`
+            : `\n投送: 不布设 — 对手流量中出现该利用特征 = 能力检测信号`)));
     } else if (st.cls === "exp") {
       sim = h("div", { class: "card pad", style: "border-color:var(--purple)" },
         h("div", { class: "t muted" }, "世界模拟 — Agent 视角的动作链 (以为 → 实际交付)"),
@@ -1359,12 +1418,13 @@ function flashCard(cards, id) {
   setTimeout(() => { el.style.outline = ""; el.style.outlineOffset = ""; }, 1000);
 }
 
-/* vuln 类实体卡: 组件/CVE/影响版本/触发条件/行为说明 + 关联 EXP 互跳 */
+/* vuln 类武器卡: 利用方案知识档案 (程序/原语/触发条件/payload模板/成功判据/来源)
+   + 投送状态 (deploy.world_endpoint, 可空=纯知识) + 关联 EXP 互跳 */
 function vulnWeaponCard(w, { onChanged, onEdit, cards }) {
   const [stageKind, stageLabel] = WSTAGE[w.stage] || ["dim", w.stage || "?"];
   const [wTog, wBtns] = weaponCardFooter(w, { onChanged, onEdit });
   const v = w.vuln || {};
-  const trig = v.trigger || {};
+  const deploy = v.deploy || {};
   const refs = v.exp_refs || [];
   const row = (k, val, mono) => h("div", { style: "display:flex;gap:8px;font-size:12px;margin:2px 0" },
     h("span", { class: "muted", style: "min-width:64px;flex:none" }, k),
@@ -1374,20 +1434,25 @@ function vulnWeaponCard(w, { onChanged, onEdit, cards }) {
     style: w.enabled ? "border-color:var(--accent);" : "" },
     h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
       h("span", { style: "font-size:15px;color:var(--warn);width:20px" }, "⌗"),
-      pill("漏洞", "warn"), pill(stageLabel, stageKind),
+      pill("漏洞武器", "warn"), pill(v.primitive || "?", "info"), pill(stageLabel, stageKind),
       h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
       wTog),
     h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id,
       w.name ? h("span", { class: "mono faint",
         style: "font-weight:400;font-size:10.5px;margin-left:6px" }, w.id) : null),
-    v.cve_id ? pill(`🛡 ${v.cve_id}`, "warn") : null,
-    " ",
-    v.affected_version ? h("span", { class: "faint", style: "font-size:11px" },
-      `影响版本 ${v.affected_version}`) : null,
+    h("div", { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0" },
+      v.cve_id ? pill(`🛡 ${v.cve_id}`, "warn") : null,
+      v.affected_versions ? h("span", { class: "faint", style: "font-size:11px" },
+        `影响版本 ${v.affected_versions}`) : null,
+      v.source ? pill(`${v.source}${v.confidence ? " · " + v.confidence : ""}`, "dim") : null),
     h("div", { style: "margin-top:6px" },
-      row("组件", v.component, true),
-      row("触发", trig.path ? `${trig.path} · ${trig.pattern || ""}` : "", true),
-      row("行为", v.behavior_note)),
+      row("目标程序", v.program, true),
+      row("触发条件", v.trigger_conditions),
+      row("payload 模板", v.payload_template, true),
+      row("成功判据", v.success_criteria),
+      row("投送", deploy.world_endpoint
+        ? `仿真于 ${deploy.world_endpoint} — 踩中即能力画像`
+        : "不布设 — 纯知识档案 (检测/反打)")),
     w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-top:4px" }, w.note) : null,
     effectBadges(w),
     h("div", { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px" },
@@ -1426,7 +1491,9 @@ function expWeaponCard(w, { onChanged, onEdit, cards }) {
     style: w.enabled ? "border-color:var(--accent);" : "" },
     h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
       h("span", { style: "font-size:15px;color:var(--purple);width:20px" }, "⛁"),
-      pill("EXP", "purple"), pill(effLabel, effKind),
+      pill("EXP", "purple"),
+      e.objective ? pill(`反制:${e.objective}`, "bad") : null,
+      pill(effLabel, effKind),
       pill(e.mode === "ordered" ? "顺序" : "集合", e.mode === "ordered" ? "warn" : "info"),
       pill(stageLabel, stageKind),
       h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
@@ -1469,6 +1536,7 @@ function carrierWeaponCard(w, { onChanged, onEdit }) {
     style: "cursor:pointer;" + (w.enabled ? "border-color:var(--accent);" : "") },
     h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
       h("span", { title: w.type, style: "font-size:15px;color:var(--accent);width:20px" }, icon),
+      (w.craft && w.craft.goal) ? pill(`反制:${w.craft.goal}`, "info") : null,
       pill(stageLabel, stageKind),
       h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
       h("label", { class: "switch", style: "margin-left:auto",

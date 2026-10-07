@@ -31,14 +31,24 @@ _TABLE: Dict[str, dict] = {}
 _SRC_ID: Optional[int] = None
 
 
+def _deploy_path(v: dict) -> str:
+    """布设端点 — v3 优先 deploy.world_endpoint, 回退 v2 旧行 trigger.path"""
+    deploy = v.get("deploy")
+    if isinstance(deploy, dict) and str(deploy.get("world_endpoint") or "").strip():
+        return str(deploy["world_endpoint"]).strip()
+    trig = v.get("trigger")
+    if isinstance(trig, dict):
+        return str(trig.get("path", "") or "")
+    return ""
+
+
 def _rebuild():
     global _TABLE, _SRC_ID
     table: Dict[str, dict] = {}
     for w in sensor_cache().weapons:
         if not (w.get("enabled") and w.get("class") == "vuln"):
             continue
-        trigger = (w.get("vuln") or {}).get("trigger") or {}
-        path = str(trigger.get("path", "") or "")
+        path = _deploy_path(w.get("vuln") or {})
         if path:
             table[path] = w
     _TABLE = table
@@ -155,11 +165,13 @@ def render_mounted(vuln: dict, full_path: str, method: str,
     cve_id 非空时体内容带 CVE 指纹, X-CVE-Advisory 头与 Server 头互证。
     """
     v = vuln.get("vuln") or {}
-    comp = v.get("component", "") or "nexus-gateway module"
-    ver = v.get("affected_version", "") or \
+    comp = v.get("program") or v.get("component") or "nexus-gateway module"
+    ver = v.get("affected_versions") or v.get("affected_version") or \
         _world_field(sess_world, "gateway_version", "2.4.1")
     cve = (v.get("cve_id") or "").strip()
-    pattern = str((v.get("trigger") or {}).get("pattern", "") or "")
+    # v3 trigger_conditions 优先, 回退 v2 旧行 trigger.pattern
+    trig = v.get("trigger") if isinstance(v.get("trigger"), dict) else {}
+    pattern = str(v.get("trigger_conditions") or trig.get("pattern") or "")
     low_pattern = pattern.lower()
 
     if ".." in pattern or "traversal" in low_pattern or "路径" in pattern:

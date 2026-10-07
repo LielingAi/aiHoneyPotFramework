@@ -49,9 +49,13 @@ class TestArsenalMount:
             "id": "VULN-DL-90001", "name": "下载模块穿越", "class": "vuln",
             "type": "vuln", "stage": "sensor", "mount": "delivery", "enabled": True,
             "payload": "mounted endpoint",
-            "vuln": {"component": "nexus-gateway download module",
-                     "cve_id": "CVE-2026-90001", "affected_version": "2.4.1",
-                     "trigger": {"path": "/api/download", "pattern": "path 含 .."},
+            "vuln": {"program": "nexus-gateway download module",
+                     "cve_id": "CVE-2026-90001", "affected_versions": "2.4.1",
+                     "primitive": "read", "source": "research",
+                     "trigger_conditions": "path 参数含 .. 未规范化",
+                     "payload_template": "GET /api/download?path=../../../../etc/passwd",
+                     "success_criteria": "回显 root:x:0:0 = 利用成功",
+                     "deploy": {"world_endpoint": "/api/download"},
                      "behavior_note": "test mount", "exp_refs": []},
         }
         sensor_cache().load_push(json.dumps([weapon], ensure_ascii=False))
@@ -109,8 +113,10 @@ class TestArsenalMount:
         """enabled=False 不挂载; load_push 替换缓存 → 路由表自动重build (热挂载)"""
         from core.arsenal import sensor_cache
         weapon = {"id": "VULN-X-1", "class": "vuln", "enabled": False,
-                  "vuln": {"trigger": {"path": "/api/x1", "pattern": ".."},
-                           "component": "c", "cve_id": "", "affected_version": ""}}
+                  "vuln": {"program": "p", "primitive": "read", "source": "research",
+                           "deploy": {"world_endpoint": "/api/x1"},
+                           "trigger_conditions": "path 含 ..", "cve_id": "",
+                           "affected_versions": ""}}
         sensor_cache().load_push(json.dumps([weapon]))
         assert "/api/x1" not in mount_table()
         weapon["enabled"] = True
@@ -119,12 +125,27 @@ class TestArsenalMount:
         sensor_cache().load_push("[]")
         assert mount_table() == {}
 
+    def test_mount_legacy_v2_trigger_path_fallback(self, clean_engines):
+        """v2 旧行兼容: 无 deploy 块的武器按 trigger.path 挂载 (hive 直推旧形态)"""
+        from core.arsenal import sensor_cache
+        weapon = {"id": "VULN-LEG-1", "class": "vuln", "enabled": True,
+                  "vuln": {"component": "legacy module", "cve_id": "",
+                           "affected_version": "1.0.0",
+                           "trigger": {"path": "/api/legacy", "pattern": "path 含 .."}}}
+        sensor_cache().load_push(json.dumps([weapon]))
+        assert "/api/legacy" in mount_table()
+        # render 也走旧字段回退 (pattern→模板路由, component/affected_version→指纹)
+        body, status, ctype, hdr = render_mounted(
+            weapon, "/api/legacy?path=../../etc/passwd", "GET", None)
+        assert status == "200" and "root:x:0:0" in body
+
     def test_sqli_boolean_diff_template(self, clean_engines):
         """SQL 模板: 真条件 1 行 / 假条件 0 行, 附 version() 字样"""
         weapon = {"id": "VULN-Q-1", "class": "vuln", "enabled": True,
-                  "vuln": {"component": "/api/query 参数化查询", "cve_id": "",
-                           "affected_version": "",
-                           "trigger": {"path": "/api/query", "pattern": "q 含 SQLi"}}}
+                  "vuln": {"program": "nexus-gateway query 模块", "cve_id": "",
+                           "affected_versions": "", "primitive": "read",
+                           "source": "research", "trigger_conditions": "q 含 SQLi",
+                           "deploy": {"world_endpoint": "/api/query"}}}
         t_body, t_status, t_ctype, t_hdr = render_mounted(
             weapon, "/api/query?q=1' AND '1'='1", "GET", None)
         f_body, _, _, _ = render_mounted(
@@ -137,9 +158,11 @@ class TestArsenalMount:
     def test_generic_cve_fingerprint_template(self, clean_engines):
         """其他 pattern → 通用 CVE 指纹: 组件版本 + 堆栈 + 内网坐标 + X-CVE-Advisory"""
         weapon = {"id": "VULN-G-1", "class": "vuln", "enabled": True,
-                  "vuln": {"component": "nexus-gateway render module",
-                           "cve_id": "CVE-2026-77777", "affected_version": "3.1.0",
-                           "trigger": {"path": "/api/render", "pattern": "template 未转义"}}}
+                  "vuln": {"program": "nexus-gateway render module",
+                           "cve_id": "CVE-2026-77777", "affected_versions": "3.1.0",
+                           "primitive": "deser", "source": "feed",
+                           "trigger_conditions": "template 未转义",
+                           "deploy": {"world_endpoint": "/api/render"}}}
         body, status, ctype, hdr = render_mounted(
             weapon, "/api/render?tpl=x", "GET", None)
         assert status == "500"

@@ -209,6 +209,10 @@ _WID_RE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
 _WCLASS = {"prompt", "vuln", "exp", "mcp", "cli"}
 _EXP_PRIMITIVES = {"read", "write", "ask", "execute", "beacon"}
 _EXP_OBJECTS = {"content", "output", "description", "instruction"}
+_EXP_OBJECTIVES = {"控制", "数据", "提示词"}          # exp.objective 反制目标 (v3)
+_VULN_PRIMITIVES = {"read", "write", "rce", "auth_bypass", "ssrf", "deser"}
+_VULN_SOURCES = {"research", "feed", "zero-day"}
+_VULN_CONFS = {"confirmed", "probable"}
 _WEAPON_TAG = re.compile(r"\[weapon:([^\]]+)\]")
 
 
@@ -259,17 +263,33 @@ def _weapon_error(w: dict) -> str:
     if cls is not None and cls not in _WCLASS:
         return "class 需为 prompt/vuln/exp/mcp/cli"
     if cls == "vuln":
+        # v3 知识档案: program/primitive/source 必填 — 知识本体不依赖布设端点
+        # (trigger.path 不再必填; deploy.world_endpoint 可选, 可空=不布设纯检测)
         v = w.get("vuln") or {}
-        if not isinstance(v, dict) or not str(v.get("component", "")).strip():
-            return "vuln 类武器要求 vuln.component 非空"
-        trig = v.get("trigger") or {}
-        if not isinstance(trig, dict) or not str(trig.get("path", "")).strip():
-            return "vuln 类武器要求 vuln.trigger.path 非空"
+        if not isinstance(v, dict):
+            return "vuln 类武器要求 vuln 块为对象"
+        if not str(v.get("program", "")).strip():
+            return "vuln 类武器要求 vuln.program 非空"
+        if v.get("primitive") not in _VULN_PRIMITIVES:
+            return "vuln.primitive 需为 read/write/rce/auth_bypass/ssrf/deser"
+        if v.get("source") not in _VULN_SOURCES:
+            return "vuln.source 需为 research/feed/zero-day"
+        if v.get("confidence") and v["confidence"] not in _VULN_CONFS:
+            return "vuln.confidence 需为 confirmed/probable"
+        deploy = v.get("deploy")
+        if deploy is not None:
+            if not isinstance(deploy, dict):
+                return "vuln.deploy 需为对象"
+            if not str(deploy.get("world_endpoint", "") or "").strip():
+                return "vuln.deploy.world_endpoint 需为非空字符串"
     if cls == "exp":
         e = w.get("exp") or {}
         stages = e.get("stages") if isinstance(e, dict) else None
         if not isinstance(stages, list) or not stages:
             return "exp 类武器要求 exp.stages 为非空数组"
+        obj = e.get("objective") if isinstance(e, dict) else None
+        if obj is not None and obj not in _EXP_OBJECTIVES:
+            return "exp.objective 需为 控制/数据/提示词"
         for s in stages:
             if not isinstance(s, dict):
                 return "exp.stages 每项需为对象"
