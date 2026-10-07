@@ -1100,8 +1100,13 @@ class Handler(BaseHTTPRequestHandler):
                 ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/requests":
             kw = qs.get("q", [""])[0].strip()
-            add, ap = (" AND (path LIKE ? OR client_ip LIKE ? OR session_id LIKE ?)",
-                       (f"%{kw}%",) * 3) if kw else ("", ())
+            if kw:
+                joiner = " AND " if run_cond else "WHERE "
+                add, ap = (joiner + "(path LIKE ? OR client_ip LIKE ? "
+                           "OR session_id LIKE ? OR body LIKE ?)",
+                           (f"%{kw}%",) * 4)
+            else:
+                add, ap = "", ()
             self._send(200, json.dumps(_paged(
                 qs, f"SELECT * FROM requests {run_cond}{add} ORDER BY req_id DESC",
                 f"SELECT COUNT(*) AS n FROM requests {run_cond}{add}", (*params, *ap),
