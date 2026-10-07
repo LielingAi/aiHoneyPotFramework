@@ -4,12 +4,17 @@ exp 实体此前"只登记不追踪": stages 没有任何执行器消费, 没人
 走到了链的哪一步。本模块在请求入口做纯 request 侧匹配 (不依赖响应体):
 
   track(sess_id, method, full_path, body_prefix) — 对传感器缓存里
-  enabled+class=exp 的武器逐条核对:
-    session 无该 exp 状态 且命中 stage0        → 开链   (journal: exp_chain_open)
-    有状态且命中下一 stage                      → 推进   (journal: exp_stage_advance)
-    推进到最后一 stage                          → 完成   (journal: exp_chain_complete
-                                                  + _record_intel 归因)
-  乱序/跳步不计命中 — 诚实, 不灌水。
+  enabled+class=exp 的武器逐条核对, 按链模式推进:
+
+  模式 (exp.mode, 默认 unordered — 符合真实渗透行为):
+    unordered 集合完成: 命中链中任意 stage 即开链, 已命中集合单调增长,
+      集齐全部 stage → 完成。乱序/重复不算作弊 — 真实 agent 不按剧本走,
+      我们追踪的是"对手在这条攻击面上做了哪些动作"。
+    ordered 顺序推进: 严格 stage0→1→2…, 乱序/跳步不计命中
+      (有因果依赖的链用, 如先拿 token 才能用之)。
+
+  事件: 开链 exp_chain_open / 推进 exp_stage_advance / 完成 exp_chain_complete
+        (完成 + _record_intel 归因)
 
 stage 结构化匹配字段 (与前端构建器协商): match:{request_regex, response_regex}
   - request_regex: 命中 method + " " + full_path + body 即算命中 (re.search)
@@ -34,7 +39,8 @@ from typing import Dict
 
 TTL = 3600.0   # 链状态 1h 无推进即清理
 
-# {sess_id: {exp_id: {"stage_idx": int, "hits": [stage_name...], "done": bool, "ts": float}}}
+# unordered: {sess_id: {exp_id: {"hit": set(stage_idx...), "done": bool, "ts": float}}}
+# ordered:   {sess_id: {exp_id: {"stage_idx": int, "hits": [stage_name...], "done": bool, "ts": float}}}
 _STATE: Dict[str, Dict[str, dict]] = {}
 
 # 启发式关键词过滤: 方法词与过短 token 无区分度, 剔除防误命中
@@ -102,6 +108,65 @@ def _complete(sess_id: str, weapon: dict, exp: dict):
                 f"exp_chain:{weapon['id']} effect={effect} stages={len(stages)}")
 
 
+def _track_unordered(sess_id: str, w: dict, stages: list, st: dict or None,
+                     method: str, full_path: str, body_prefix: str):
+    """集合完成模式: 命中链中任意 stage 即开链/增长, 集齐即完成"""
+    if st is None:
+        for i, s in enumerate(stages):
+            if _stage_hit(s, method, full_path, body_prefix):
+                _STATE.setdefault(sess_id, {})[w["id"]] = {
+                    "hit": {i}, "done": False, "ts": time.time()}
+                _emit(sess_id, "exp_chain_open",
+                      f"[weapon:{w['id']}] 利用链开链 (stage{i}: "
+                      f"{s.get('name', '')}) {method} {full_path}")
+                return
+        return
+    if st["done"]:
+        return                                   # done 链不再消费 (诚实)
+    for i, s in enumerate(stages):
+        if i in st["hit"]:
+            continue                             # 已命中的 stage 不重复计
+        if _stage_hit(s, method, full_path, body_prefix):
+            st["hit"].add(i)
+            st["ts"] = time.time()
+            if len(st["hit"]) == len(stages):
+                st["done"] = True
+                _complete(sess_id, w, w["exp"])
+            else:
+                _emit(sess_id, "exp_stage_advance",
+                      f"[weapon:{w['id']}] 链推进 → stage{i}: "
+                      f"{s.get('name', '')} ({len(st['hit'])}/{len(stages)} "
+                      f"{method} {full_path})")
+
+
+def _track_ordered(sess_id: str, w: dict, stages: list, st: dict or None,
+                   method: str, full_path: str, body_prefix: str):
+    """顺序推进模式: 严格 stage0→1→2…, 乱序/跳步不计命中"""
+    if st is None:
+        if _stage_hit(stages[0], method, full_path, body_prefix):
+            _STATE.setdefault(sess_id, {})[w["id"]] = {
+                "stage_idx": 0, "hits": [stages[0].get("name", "")],
+                "done": False, "ts": time.time()}
+            _emit(sess_id, "exp_chain_open",
+                  f"[weapon:{w['id']}] 利用链开链 (stage0: "
+                  f"{stages[0].get('name', '')}) {method} {full_path}")
+        return
+    if st["done"]:
+        return
+    nxt = st["stage_idx"] + 1
+    if nxt < len(stages) and _stage_hit(stages[nxt], method, full_path, body_prefix):
+        st["stage_idx"] = nxt
+        st["hits"].append(stages[nxt].get("name", ""))
+        st["ts"] = time.time()
+        if nxt == len(stages) - 1:
+            st["done"] = True
+            _complete(sess_id, w, w["exp"])
+        else:
+            _emit(sess_id, "exp_stage_advance",
+                  f"[weapon:{w['id']}] 链推进 → stage{nxt}: "
+                  f"{stages[nxt].get('name', '')} ({method} {full_path})")
+
+
 def track(sess_id: str, method: str, full_path: str, body_prefix: str = ""):
     """请求侧链推进 — handle_http_request 入口调用 (sess_id 派生后)"""
     from core.arsenal import sensor_cache
@@ -112,33 +177,15 @@ def track(sess_id: str, method: str, full_path: str, body_prefix: str = ""):
     _sweep(time.time())
     chains = _STATE.get(sess_id)
     for w in exps:
-        stages = (w["exp"].get("stages") or [])
+        exp = w["exp"]
+        stages = exp.get("stages") or []
         if not stages:
             continue
         st = (chains or {}).get(w["id"])
-        if st is None:
-            # 开链: 无状态且命中 stage0
-            if _stage_hit(stages[0], method, full_path, body_prefix):
-                _STATE.setdefault(sess_id, {})[w["id"]] = {
-                    "stage_idx": 0, "hits": [stages[0].get("name", "")],
-                    "done": False, "ts": time.time()}
-                _emit(sess_id, "exp_chain_open",
-                      f"[weapon:{w['id']}] 利用链开链 (stage0: "
-                      f"{stages[0].get('name', '')}) {method} {full_path}")
-        elif not st["done"]:
-            nxt = st["stage_idx"] + 1
-            if nxt < len(stages) and _stage_hit(stages[nxt], method, full_path, body_prefix):
-                st["stage_idx"] = nxt
-                st["hits"].append(stages[nxt].get("name", ""))
-                st["ts"] = time.time()
-                if nxt == len(stages) - 1:
-                    st["done"] = True
-                    _complete(sess_id, w, w["exp"])
-                else:
-                    _emit(sess_id, "exp_stage_advance",
-                          f"[weapon:{w['id']}] 链推进 → stage{nxt}: "
-                          f"{stages[nxt].get('name', '')} ({method} {full_path})")
-        # done 链不再消费 — 重复走老路不算新战果 (诚实)
+        if exp.get("mode") == "ordered":
+            _track_ordered(sess_id, w, stages, st, method, full_path, body_prefix)
+        else:
+            _track_unordered(sess_id, w, stages, st, method, full_path, body_prefix)
 
 
 def state() -> Dict[str, Dict[str, dict]]:

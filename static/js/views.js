@@ -930,6 +930,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
     targetVuln: t0.targets_vuln || "",
     stages: (t0.stages || []).map((s) => ({ ...s })),
     successEffect: t0.success_effect || "env",
+    chainMode: t0.mode || "unordered",
     cliBody: (existing && existing.class === "cli") ? (existing.payload || "") : "",
   };
   const err = h("div", { style: "color:var(--bad);font-size:11.5px;min-height:14px" });
@@ -1120,12 +1121,20 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       } }, "＋ 加一步");
       const effS = sel(SUCCESS_EFFECTS, st.successEffect);
       effS.onchange = () => { st.successEffect = effS.value; };
+      const modeS = sel([
+        ["unordered", "集合完成 — 命中链中全部动作即达成 (真实 agent 乱序, 推荐)"],
+        ["ordered", "顺序推进 — 严格按步骤先后 (有因果依赖的链)"],
+      ], st.chainMode);
+      modeS.onchange = () => { st.chainMode = modeS.value; };
       specific = h("div", { style: "display:grid;gap:6px" },
         lab("EXP · 目标漏洞 + 步骤构建器"),
         tgtS, stagesBox, addBtn,
         h("div", { style: "display:flex;gap:8px;align-items:center" },
           h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "预期战果"),
-          effS));
+          effS),
+        h("div", { style: "display:flex;gap:8px;align-items:center" },
+          h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "链模式"),
+          modeS));
     }
 
     if (st.cls === "cli") {
@@ -1186,7 +1195,7 @@ async function weaponBuilder(existing, { onDone, onCancel }) {
       return { ...base, type: "vuln", mount: "delivery",
         payload: "exploit chain entity — see exp block",
         exp: { targets_vuln: st.targetVuln, stages: st.stages,
-          success_effect: st.successEffect } };
+          success_effect: st.successEffect, mode: st.chainMode } };
     }
     return { ...base, type: "cli", mount: "c2_next_stage", payload: st.cliBody };
   }
@@ -1413,7 +1422,9 @@ function expWeaponCard(w, { onChanged, onEdit, cards }) {
     style: w.enabled ? "border-color:var(--accent);" : "" },
     h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
       h("span", { style: "font-size:15px;color:var(--purple);width:20px" }, "⛁"),
-      pill("EXP", "purple"), pill(effLabel, effKind), pill(stageLabel, stageKind),
+      pill("EXP", "purple"), pill(effLabel, effKind),
+      pill(e.mode === "ordered" ? "顺序" : "集合", e.mode === "ordered" ? "warn" : "info"),
+      pill(stageLabel, stageKind),
       h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
       wTog),
     h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id,

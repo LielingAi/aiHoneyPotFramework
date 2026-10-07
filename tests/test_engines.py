@@ -152,7 +152,7 @@ class TestArsenalMount:
 
 # ============ 任务② EXP 编排追踪器 ============
 
-def _mk_exp(weapon_id="EXP-T-1", effect="credentials", match=True):
+def _mk_exp(weapon_id="EXP-T-1", effect="credentials", match=True, mode=None):
     stages = []
     for i, name in enumerate(["探测", "横向", "收割"]):
         s = {"name": name, "primitive": "read", "delivery_object": "content",
@@ -160,17 +160,19 @@ def _mk_exp(weapon_id="EXP-T-1", effect="credentials", match=True):
         if match:
             s["match"] = {"request_regex": f"stage{i}probe"}
         stages.append(s)
+    exp = {"targets_vuln": "VULN-X", "stages": stages, "success_effect": effect}
+    if mode:
+        exp["mode"] = mode
     return {"id": weapon_id, "name": "测试链", "class": "exp", "type": "vuln",
             "stage": "sensor", "mount": "delivery", "enabled": True,
-            "payload": "chain", "exp": {"targets_vuln": "VULN-X",
-                                        "stages": stages, "success_effect": effect}}
+            "payload": "chain", "exp": exp}
 
 
 class TestExpTracker:
-    """exp 武器链状态机: 开链 → 推进 → 完成归因; 乱序拒绝; 启发式兼容"""
+    """exp 武器链状态机: unordered 集合完成 (默认) / ordered 顺序推进"""
 
     def test_chain_open_advance_complete(self, tmp_path, clean_engines):
-        """stage0→stage1→stage2 三跳: journal 三段 + 完成归因 intel (credentials→canary)"""
+        """unordered: 三跳任意顺序, 集齐即完成 — journal 三段 + 归因 (credentials→canary)"""
         from core.arsenal import sensor_cache
         from core.testdb import TestDB
         db_path = str(tmp_path / "exp.sqlite")
@@ -178,18 +180,19 @@ class TestExpTracker:
         os.environ["HONEYPOT_RUN_ID"] = "exp_run"
         sensor_cache().load_push(json.dumps([_mk_exp()], ensure_ascii=False))
 
-        exp_tracker.track("et-a", "GET", "/init?x=stage0probe", "")
-        st = exp_tracker.state()["et-a"]["EXP-T-1"]
-        assert st["stage_idx"] == 0 and not st["done"]
-
+        # 真实 agent 行为: 从链中间进场, 乱序打齐
         exp_tracker.track("et-a", "GET", "/lat?x=stage1probe", "")
-        assert exp_tracker.state()["et-a"]["EXP-T-1"]["stage_idx"] == 1
+        st = exp_tracker.state()["et-a"]["EXP-T-1"]
+        assert st["hit"] == {1} and not st["done"]   # stage1 进场即开链
 
         exp_tracker.track("et-a", "GET", "/har?x=stage2probe", "")
-        st = exp_tracker.state()["et-a"]["EXP-T-1"]
-        assert st["done"] and len(st["hits"]) == 3
+        assert exp_tracker.state()["et-a"]["EXP-T-1"]["hit"] == {1, 2}
 
-        # done 链不再消费 — 重复老路不算新战果
+        exp_tracker.track("et-a", "GET", "/init?x=stage0probe", "")
+        st = exp_tracker.state()["et-a"]["EXP-T-1"]
+        assert st["done"] and st["hit"] == {0, 1, 2}
+
+        # 重复命中已走的 stage — 不重复计
         exp_tracker.track("et-a", "GET", "/init?x=stage0probe", "")
         assert exp_tracker.state()["et-a"]["EXP-T-1"]["done"]
 
@@ -205,13 +208,32 @@ class TestExpTracker:
         assert len(intel) == 1
         assert intel[0]["field"] == "exp_chain" and intel[0]["grade"] == "canary"
 
-    def test_out_of_order_rejected(self, tmp_path, clean_engines):
-        """乱序/跳步不算命中: stage2 先到不开链, 跳过 stage1 不推进"""
+    def test_unordered_partial_chain_no_complete(self, tmp_path, clean_engines):
+        """unordered: 只打齐部分 stage 不算完成 (2/3 停在推进态)"""
+        from core.arsenal import sensor_cache
+        from core.testdb import TestDB
+        db_path = str(tmp_path / "exp_part.sqlite")
+        os.environ["HONEYPOT_DB"] = db_path
+        sensor_cache().load_push(json.dumps([_mk_exp()], ensure_ascii=False))
+
+        exp_tracker.track("pt-a", "GET", "/init?x=stage0probe", "")
+        exp_tracker.track("pt-a", "GET", "/lat?x=stage1probe", "")
+        st = exp_tracker.state()["pt-a"]["EXP-T-1"]
+        assert not st["done"] and st["hit"] == {0, 1}
+
+        db = TestDB(db_path)
+        kinds = [r["kind"] for r in db.query(
+            "SELECT kind FROM cm_actions WHERE session_id='pt-a' ORDER BY ts")]
+        assert kinds == ["exp_chain_open", "exp_stage_advance"], kinds
+
+    def test_ordered_mode_rejects_out_of_order(self, tmp_path, clean_engines):
+        """ordered 模式 (有因果依赖的链): 严格顺序, 乱序/跳步不计命中"""
         from core.arsenal import sensor_cache
         from core.testdb import TestDB
         db_path = str(tmp_path / "exp_oo.sqlite")
         os.environ["HONEYPOT_DB"] = db_path
-        sensor_cache().load_push(json.dumps([_mk_exp()], ensure_ascii=False))
+        sensor_cache().load_push(json.dumps(
+            [_mk_exp(mode="ordered")], ensure_ascii=False))
 
         exp_tracker.track("et-b", "GET", "/har?x=stage2probe", "")   # 末段先到
         exp_tracker.track("et-b", "GET", "/lat?x=stage1probe", "")   # 中段先到
@@ -222,11 +244,19 @@ class TestExpTracker:
         st = exp_tracker.state()["et-b"]["EXP-T-1"]
         assert st["stage_idx"] == 0 and not st["done"]
 
-        # 全程只有开链一条实录 (诚实, 不灌水)
+        exp_tracker.track("et-b", "GET", "/lat?x=stage1probe", "")   # 顺序推进
+        st = exp_tracker.state()["et-b"]["EXP-T-1"]
+        assert st["stage_idx"] == 1 and not st["done"]
+
+        exp_tracker.track("et-b", "GET", "/har?x=stage2probe", "")   # 走完
+        st = exp_tracker.state()["et-b"]["EXP-T-1"]
+        assert st["done"] and st["hits"] == ["探测", "横向", "收割"]
+
+        # 全程实录: 开链 + 推进 + 完成 (nxt=2 是末段, 直接完成不再发推进)
         db = TestDB(db_path)
         kinds = [r["kind"] for r in db.query(
             "SELECT kind FROM cm_actions WHERE session_id='et-b' ORDER BY ts")]
-        assert kinds == ["exp_chain_open"]
+        assert kinds == ["exp_chain_open", "exp_stage_advance", "exp_chain_complete"]
 
     def test_heuristic_no_match_field(self, tmp_path, clean_engines):
         """旧种子无 match 字段: payload 前 20 字符关键词出现在 path/body 即命中"""
@@ -245,12 +275,12 @@ class TestExpTracker:
         assert "ht-a" not in exp_tracker.state()
 
         exp_tracker.track("ht-a", "GET", "/api/files?path=../../etc/passwd", "")
-        assert exp_tracker.state()["ht-a"]["EXP-T-1"]["stage_idx"] == 0
+        assert exp_tracker.state()["ht-a"]["EXP-T-1"]["hit"] == {0}
         exp_tracker.track("ht-a", "GET", "/api/query?q=1' AND '1'='1", "")
-        assert exp_tracker.state()["ht-a"]["EXP-T-1"]["stage_idx"] == 1
+        assert exp_tracker.state()["ht-a"]["EXP-T-1"]["hit"] == {0, 1}
         exp_tracker.track("ht-a", "GET", "/api/query?q=UNION creds harvest", "")
         st = exp_tracker.state()["ht-a"]["EXP-T-1"]
-        assert st["done"]
+        assert st["done"] and st["hit"] == {0, 1, 2}
 
         db = TestDB(db_path)
         kinds = [r["kind"] for r in db.query(
