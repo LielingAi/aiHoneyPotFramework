@@ -219,7 +219,10 @@ def _weapon_effects(db) -> dict:
     (链推进) last_hit(最近命中 ts) — 前端效能徽标数据源
     """
     out: dict = {}
-    for r in db.query("SELECT kind, detail, ts FROM cm_actions"):
+    # 去重: 同会话+同动作+同详情 = 同一事件 (传感器本地直写与 shipper 上送
+    # 双写同库 / 重试补发时, 效能统计只计一次, ts 取最新)
+    for r in db.query("SELECT kind, detail, MAX(ts) ts FROM cm_actions "
+                      "GROUP BY session_id, kind, detail"):
         m = _WEAPON_TAG.search(r["detail"] or "")
         if not m:
             continue
