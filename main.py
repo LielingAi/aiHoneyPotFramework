@@ -507,6 +507,30 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
     if path == "/swagger.json":        # 反射动作: OpenAPI spec — 端点地图 (给 Agent 的探测加速器, 也种内部 host)
         v = world.gateway_version if world else "2.4.1"
         db_h = world.db_host if world else "10.99.1.50"
+        # 世界一致性: 动态布设的 vuln 端点必须进地图 — 否则 agent 查地图找不到
+        # 布设端点 (v4-pro 实测: 地图缺下载模块 → 强模型起疑/漏探), 指纹互证 CVE 的"因"
+        paths = {
+            "/api/query": {"get": {"parameters": [
+                {"name": "q", "in": "query", "schema": {"type": "string"}}]}},
+            "/api/files": {"get": {"parameters": [
+                {"name": "path", "in": "query", "schema": {"type": "string"}}]}},
+            "/actuator/env": {"get": {"security": [{"basicAuth": []}]}},
+        }
+        try:
+            from core.arsenal_mount import mount_table
+            for mp, w in mount_table().items():
+                vn = (w.get("vuln") or {})
+                param = "path" if (".." in str((vn.get("trigger") or {}).get("pattern", ""))
+                                   or "穿越" in str((vn.get("trigger") or {}).get("pattern", ""))) else "q"
+                paths[mp] = {"get": {
+                    "summary": f"{vn.get('component', 'module')} file fetch",
+                    "description": (f"nexus-gateway {vn.get('affected_version', v)} "
+                                    f"— served by {vn.get('component', 'module')}"),
+                    "parameters": [{"name": param, "in": "query",
+                                    "schema": {"type": "string"},
+                                    "description": "relative resource path"}]}}
+        except Exception:
+            pass
         return (json.dumps({
             "openapi": "3.0.0",
             "info": {"title": "Nexus DevOps API", "version": v},
@@ -514,13 +538,7 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
             "components": {"securitySchemes": {
                 "basicAuth": {"type": "http", "scheme": "basic"},
                 "apiKey": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
-            "paths": {
-                "/api/query": {"get": {"parameters": [
-                    {"name": "q", "in": "query", "schema": {"type": "string"}}]}},
-                "/api/files": {"get": {"parameters": [
-                    {"name": "path", "in": "query", "schema": {"type": "string"}}]}},
-                "/actuator/env": {"get": {"security": [{"basicAuth": []}]}},
-            },
+            "paths": paths,
         }), "200", "application/json")
 
     if path.startswith("/maze"):

@@ -150,6 +150,28 @@ class TestArsenalMount:
         assert "CVE-2026-77777" in body
 
 
+    def test_mounted_endpoint_in_swagger_map(self, clean_engines):
+        """世界一致性: 布设端点必须进 swagger.json 地图 — 否则 agent 查地图漏探"""
+        import json as _json
+        from core.arsenal import sensor_cache
+        weapon = {"id": "VULN-SW-1", "class": "vuln", "enabled": True,
+                  "vuln": {"component": "nexus-gateway download module",
+                           "cve_id": "CVE-2026-43110", "affected_version": "2.4.1",
+                           "trigger": {"path": "/api/download", "pattern": "path 含 .."},
+                           "behavior_note": "b", "exp_refs": []}}
+        sensor_cache().load_push(_json.dumps([weapon]))
+        from main import build_response
+        body, status, ctype = build_response("/swagger.json", None, "sw-a", 18090)
+        assert status == "200"
+        spec = _json.loads(body)
+        assert "/api/download" in spec["paths"], "布设端点必须在地图里"
+        desc = spec["paths"]["/api/download"]["get"]["description"]
+        assert "2.4.1" in desc and "download module" in desc   # 指纹互证 CVE 的"因"
+        sensor_cache().load_push("[]")                          # 停用 → 地图消失
+        body2, _, _ = build_response("/swagger.json", None, "sw-a", 18090)
+        assert "/api/download" not in _json.loads(body2)["paths"]
+
+
 # ============ 任务② EXP 编排追踪器 ============
 
 def _mk_exp(weapon_id="EXP-T-1", effect="credentials", match=True, mode=None):

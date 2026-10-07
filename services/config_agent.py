@@ -98,6 +98,23 @@ class ConfigAgent:
                     rebuild_mounts()
                 except Exception:
                     pass
+                # 世界一致性: 布设端点进表面目录并重上送 hive —
+                # 否则构建器/地图看不到新端点 (v4-pro 实测: 地图缺下载模块 → 漏探)
+                try:
+                    import json as _json
+                    from core.arsenal_mount import mount_table
+                    from services.sensor_shipper import enqueue as _ship_meta
+                    import main as _main
+                    mounted = [{"path": p, "methods": ["GET"], "vulnerable": True,
+                                "vuln_id": (w.get("vuln") or {}).get("cve_id", "") or w["id"],
+                                "note": f"动态布设 — {(w.get('vuln') or {}).get('component', '')}"}
+                               for p, w in mount_table().items()]
+                    _ship_meta("meta", {"key": "world_surface",
+                                        "value": _json.dumps(
+                                            _main.WORLD_SURFACE + mounted,
+                                            ensure_ascii=False)})
+                except Exception:
+                    pass
             elif key in ALERT_KEYS:
                 from services import alerter
                 alerter.CONFIG[key] = str(val)
