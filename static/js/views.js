@@ -602,6 +602,10 @@ async function viewRequests(ctx) {
         ["运行", r.run_id], ["时间", relTime(r.ts)]]),
       h("div", { class: "t muted" }, "User-Agent"), h("pre", {}, r.user_agent || ""),
       r.query ? h("div", {}, h("div", { class: "t muted" }, "Query"), h("pre", {}, r.query)) : null,
+      r.body ? h("div", {}, h("div", { class: "t muted" },
+        `POST 数据 (${r.body.length} 字符)`),
+        h("pre", { class: "mono", style: "white-space:pre-wrap;word-break:break-all" },
+          r.body)) : null,
       h("button", { class: "btn primary", style: "margin-top:12px", onclick: () => {
         sessionStorage.setItem("pending_sid", r.session_id);
         location.hash = "#/sessions";
@@ -1932,14 +1936,23 @@ async function viewSessions(ctx) {
             `${data.steps.length} 步 · 跨度 ${((data.steps[data.steps.length-1].ts - t0) / 60).toFixed(1)} 分钟`)),
         ...data.steps.map((st) => {
           const [icon, kind, label] = STEP_META[st.kind] || STEP_META.probe;
-          const row = h("div", { class: "threat-item" },
+          const bodyPre = st.body ? h("pre", { class: "mono", style:
+            "background:var(--bg);border:1px solid var(--border);border-radius:6px;"
+            + "padding:6px;font-size:11px;white-space:pre-wrap;word-break:break-all;"
+            + "margin:4px 0 2px 52px;display:none;max-width:640px" }, st.body) : null;
+          const row = h("div", { class: "threat-item",
+            style: st.body ? "cursor:pointer" : "",
+            onclick: st.body ? () => { bodyPre.style.display =
+              bodyPre.style.display === "none" ? "block" : "none"; } : null },
             h("span", { class: "time" }, "+" + ((st.ts - t0)).toFixed(0) + "s"),
             pill(`${icon} ${label}`, kind),
             h("b", { style: "color:var(--accent);width:44px" }, st.method || "·"),
             h("span", { class: "path" }, st.path),
+            st.body ? h("span", { class: "faint", style: "font-size:10.5px" },
+              ` · ${st.body.length} 字符, 点击看内容`) : null,
             st.notes?.length ? h("span", { class: "faint", style: "font-size:11.5px" },
               st.notes.join("; ")) : null);
-          return row;
+          return bodyPre ? h("div", {}, row, bodyPre) : row;
         })));
     } catch (e) {
       box.replaceChildren(h("div", { class: "empty" }, "加载失败: " + e.message));

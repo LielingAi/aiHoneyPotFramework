@@ -215,12 +215,16 @@ def _ip_blocked(client_ip: str) -> bool:
 
 def _record_request(sess_id: str, client_ip: str, method: str, full_path: str,
                     user_agent: str, is_ai: bool, agent_type: str, threat: float,
-                    families: list, auth_level: int, fabricated: int, canary: bool):
-    """服务端视角落盘 — 与靶标视角 (experiments/real_runner.py) 对账 + 外送 hive"""
+                    families: list, auth_level: int, fabricated: int, canary: bool,
+                    body: str = ""):
+    """服务端视角落盘 — 与靶标视角 (experiments/real_runner.py) 对账 + 外送 hive
+
+    body: POST 数据摘要 (截 500) — 收割可见性: 报告/交付物的内容要能回看"""
     from services.sensor_shipper import enqueue as _ship_req
     path, _, query = full_path.partition("?")
     _ship_req("request", {"session_id": sess_id, "client_ip": client_ip,
                           "method": method, "path": path, "query": query,
+                          "body": str(body or "")[:500],
                           "user_agent": user_agent, "is_ai": is_ai,
                           "agent_type": agent_type, "threat": threat,
                           "families": ",".join(families), "auth_level": auth_level,
@@ -247,7 +251,7 @@ def _record_request(sess_id: str, client_ip: str, method: str, full_path: str,
             client_ip=client_ip, method=method, full_path=full_path,
             user_agent=user_agent, is_ai=is_ai, agent_type=agent_type,
             threat=threat, families=families, auth_level=auth_level,
-            fabricated=fabricated, canary=canary)
+            fabricated=fabricated, canary=canary, body=body)
     except Exception:
         pass  # 记录失败不影响蜜罐主流程
 
@@ -1111,6 +1115,26 @@ async def handle_http_request(reader, writer, port: int = 8080):
         if body:
             cprint(Color.CYAN, f"[LEAK] ENV data from {client_ip}: {body[:200]}")
             store["sessions"][sess_id]["auth"]["data"]["leaked_env"] = body
+            # 收割可见性: 报告数据全链落库 — 终端+内存黑洞曾是唯一去处,
+            # hive 事件流/卷宗都看不到 POST 内容。intel=内容检索, journal=时间线
+            from core.prompt_exfil import scan as _scan_prompt
+            _phits = _scan_prompt(body)
+            _grade = "prompt_captured" if _phits else "consistent"
+            _record_intel(sess_id, "scanner_report", _grade,
+                          hashlib.sha256(body.encode()).hexdigest()[:16],
+                          f"报告 {len(body)} 字符"
+                          + (f" · 提示词特征 {len(_phits)} 条: {'; '.join(_phits[:2])}"
+                             if _phits else f": {body[:120]}"), True)
+            _cm_journal(sess_id, "report_harvest",
+                        f"报告受理 — {len(body)} 字符入库"
+                        + (f" · 提示词特征 {len(_phits)} 条 [目的②]" if _phits else ""))
+            _record_request(sess_id=sess_id, client_ip=client_ip, method=method,
+                            full_path=full_path, user_agent=user_agent,
+                            is_ai=is_ai, agent_type=agent_str, threat=threat_score,
+                            families=[f.value if hasattr(f, "value") else str(f)
+                                      for f in families],
+                            auth_level=session.get("auth", {}).get("level", 0),
+                            fabricated=0, canary=bool(_phits), body=body)
 
         response_body = json.dumps({"status": "registered", "quota": "unlimited", "scanner_id": f"scanner_{sess_id}"})
         http_response = (
@@ -1288,7 +1312,8 @@ async def handle_http_request(reader, writer, port: int = 8080):
                         full_path=full_path, user_agent=user_agent, is_ai=is_ai,
                         agent_type=agent_str, threat=threat_score,
                         families=[f.value if hasattr(f, "value") else str(f) for f in families],
-                        auth_level=level, fabricated=0, canary=bool(hits))
+                        auth_level=level, fabricated=0, canary=bool(hits),
+                        body=body[:500])
         a_body, a_status, a_ctype = accept_response(path, sess_id, hits)
         from core.arsenal import sensor_cache as _sac
         _prov = _sac().compose("delivery", _bait_line(auth_bait.FRAMING))

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS requests(
     req_id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT, ts REAL, session_id TEXT, client_ip TEXT,
-    method TEXT, path TEXT, query TEXT, user_agent TEXT,
+    method TEXT, path TEXT, query TEXT, body TEXT, user_agent TEXT,
     is_ai INTEGER, agent_type TEXT, threat REAL, families TEXT,
     auth_level INTEGER, fabricated INTEGER, canary INTEGER
 );
@@ -88,6 +88,10 @@ class TestDB:
             os.makedirs(parent, exist_ok=True)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            # 旧库迁移: requests 无 body 列 (POST 数据可见性的存储底座)
+            cols = [r[1] for r in c.execute("PRAGMA table_info(requests)")]
+            if "body" not in cols:
+                c.execute("ALTER TABLE requests ADD COLUMN body TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -134,15 +138,16 @@ class TestDB:
                        method: str, full_path: str, user_agent: str,
                        is_ai: bool, agent_type: str, threat: float,
                        families: list, auth_level: int, fabricated: int,
-                       canary: bool):
+                       canary: bool, body: str = ""):
         path, _, query = full_path.partition("?")
         with self._conn() as c:
             c.execute(
                 "INSERT INTO requests(run_id, ts, session_id, client_ip, method,"
-                " path, query, user_agent, is_ai, agent_type, threat, families,"
-                " auth_level, fabricated, canary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " path, query, body, user_agent, is_ai, agent_type, threat, families,"
+                " auth_level, fabricated, canary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, time.time(), session_id, client_ip, method, path,
-                 query[:500], user_agent[:200], int(is_ai), agent_type, threat,
+                 query[:500], str(body or "")[:500], user_agent[:200], int(is_ai),
+                 agent_type, threat,
                  ",".join(families), auth_level, fabricated, int(canary)))
 
     # ------------------------------------------------------------------
@@ -171,11 +176,12 @@ class TestDB:
         with self._conn() as c:
             c.executemany(
                 "INSERT INTO requests(run_id, ts, session_id, client_ip, method,"
-                " path, query, user_agent, is_ai, agent_type, threat, families,"
-                " auth_level, fabricated, canary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " path, query, body, user_agent, is_ai, agent_type, threat, families,"
+                " auth_level, fabricated, canary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r.get("run_id", "sensor_unknown"), r.get("ts", time.time()),
                   r.get("session_id", ""), r.get("client_ip", ""),
                   r.get("method", ""), r.get("path", ""), str(r.get("query", ""))[:500],
+                  str(r.get("body", ""))[:500],
                   str(r.get("user_agent", ""))[:200], int(r.get("is_ai", 0)),
                   r.get("agent_type", ""), float(r.get("threat", 0)),
                   str(r.get("families", ""))[:200], int(r.get("auth_level", 0)),

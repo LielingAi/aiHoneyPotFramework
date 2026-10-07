@@ -368,7 +368,8 @@ def _session_timeline(session_id: str) -> dict:
         prev_level = max(prev_level, r["auth_level"] or 0)
         events.append({"ts": r["ts"], "kind": kind, "method": r["method"],
                        "path": r["path"], "threat": r["threat"], "notes": note,
-                       "agent_type": r["agent_type"], "run_id": r["run_id"]})
+                       "body": r["body"] or "", "agent_type": r["agent_type"],
+                       "run_id": r["run_id"]})
     for i in intel:
         events.append({"ts": i["ts"], "kind": "intel", "method": "",
                        "path": f"情报 · {i['field']}", "threat": 0,
