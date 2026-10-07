@@ -1916,7 +1916,11 @@ async function viewSessions(ctx) {
               `${s.n} 请求 · 触雷 ${s.canary} · 最后活跃 ${relTime(s.last)}`),
             s.canary ? pill("触雷", "ok") : null)))));
     }
-  } catch (_) {}
+  } catch (e) {
+    if (e.code === 401) return;   /* api.js 已全局弹登录页, 这里静默即可 */
+    root.append(h("div", { class: "empty" },
+      "会话列表加载失败: " + e.message + " — 刷新或重新登录"));
+  }
   root.append(box);
 
   async function load(sid) {

@@ -21,9 +21,18 @@ function qs(params = {}) {
 
 async function get(name, params) {
   const r = await fetch(`/api/${name}${qs(params)}`, { credentials: "same-origin" });
-  if (r.status === 401) throw Object.assign(new Error("unauthorized"), { code: 401 });
+  if (r.status === 401) { _expired(); throw Object.assign(new Error("unauthorized"), { code: 401 }); }
   if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
   return r.json();
+}
+
+/* 会话过期全局信号 — hive 重启即清空内存 SESSIONS, 旧 cookie 全部失效。
+   view 内部的 catch 吞错曾导致列表无声消失; 统一派发, app.js 弹登录页 */
+let _expiredTimer = null;
+function _expired() {
+  if (_expiredTimer) return;
+  _expiredTimer = setTimeout(() => { _expiredTimer = null; }, 3000);
+  window.dispatchEvent(new CustomEvent("hp:expired"));
 }
 
 async function post(path, body, { json = true } = {}) {
@@ -36,7 +45,8 @@ async function post(path, body, { json = true } = {}) {
     },
     body: json ? JSON.stringify(body || {}) : undefined,
   });
-  if (!r.ok && r.status !== 401) {
+  if (r.status === 401) { _expired(); throw Object.assign(new Error("unauthorized"), { code: 401 }); }
+  if (!r.ok) {
     let detail = {};
     try { detail = await r.json(); } catch (_) {}
     throw Object.assign(new Error(detail.error || `HTTP ${r.status}`), { code: r.status });

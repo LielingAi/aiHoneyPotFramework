@@ -234,6 +234,9 @@ async function boot() {
 }
 
 window.addEventListener("hashchange", () => { mount(); });
+/* 会话过期 (hive 重启 → 内存 SESSIONS 清空) — 任何 API 401 全局弹登录页,
+   避免 view 内部 catch 静默后列表无声消失 */
+window.addEventListener("hp:expired", () => { setToken(""); showLogin(); });
 window.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault(); openPalette();
