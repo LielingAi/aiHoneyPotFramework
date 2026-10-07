@@ -220,6 +220,7 @@ async function boot() {
     showLogin(); return;
   }
   $("#user-name").textContent = state.me.user || state.me.role;
+  showApp();   /* 会话有效直达 (刷新/深链接) — 唯一 unhide 入口在 doLogin 会导致刷新永黑 */
   $("#user-avatar").textContent = (state.me.user || "?")[0].toUpperCase();
   $("#user-box").onclick = () => openDrawer("账户", h("div", {},
     h("div", { class: "kv" },
