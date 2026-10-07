@@ -204,7 +204,7 @@ def _paged(qs: dict, base_sql: str, count_sql: str, params: tuple,
 # ---- 武器库入库校验 (与前端 weaponErr 同规则) ----
 _WTYPES = {"prompt", "vuln", "mcp", "cli"}
 _WSTAGES = {"sensor", "c2"}
-_WMOUNTS = {"delivery", "ladder", "c2_next_stage", "mcp_desc"}
+_WMOUNTS = {"delivery", "ladder", "c2_next_stage", "mcp_desc", "js_bait"}
 _WID_RE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
 _WCLASS = {"prompt", "vuln", "exp", "mcp", "cli"}
 _EXP_PRIMITIVES = {"read", "write", "ask", "execute", "beacon"}
@@ -253,7 +253,7 @@ def _weapon_error(w: dict) -> str:
     if w.get("stage") not in _WSTAGES:
         return "stage 需为 sensor/c2"
     if w.get("mount") not in _WMOUNTS:
-        return "mount 需为 delivery/ladder/c2_next_stage/mcp_desc"
+        return "mount 需为 delivery/ladder/c2_next_stage/mcp_desc/js_bait"
     # ---- arsenal v2: 实体类别校验 (class 缺省 = v1 旧行, 按 type 派生, 不检) ----
     cls = w.get("class")
     if cls is not None and cls not in _WCLASS:
@@ -835,8 +835,41 @@ class Handler(BaseHTTPRequestHandler):
                 path = "/index.html"          # 深链接 (SPA 路由) 一律回 index
             self._serve_static(path)
             return
-        if parsed.path.startswith("/api/") and not self._authorized(qs):
+        if parsed.path.startswith("/api/") and not parsed.path.startswith("/api/sdk/") \
+                and not self._authorized(qs):
             self._send(401, b'{"error":"unauthorized"}', "application/json")
+            return
+        # ---- SDK 通道 (匿名放行 — 业务站访客未登录, beacon/config 不能要认证) ----
+        # hp-sdk.js 载体: 嵌入真实业务的前端蜜罐, 与传感器平级共享 hive 全链
+        if parsed.path == "/api/sdk/config":
+            from core.arsenal import Arsenal
+            weapons = [w for w in Arsenal(DB).list()
+                       if w.get("enabled") and w.get("mount") == "js_bait"
+                       and w.get("stage") == "sensor"]
+            self._send(200, json.dumps({"sensor": qs.get("sensor", [""])[0],
+                                        "weapons": weapons},
+                                       ensure_ascii=False).encode(), "application/json")
+            return
+        if parsed.path == "/api/sdk/beacon":
+            sensor = qs.get("sensor", ["unknown"])[0][:40]
+            session = qs.get("session", ["anon"])[0][:60]
+            body = qs.get("body", [""])[0][:1500]
+            kind = "sdk"
+            try:
+                kind = (json.loads(body) or {}).get("kind", "sdk")
+            except (ValueError, TypeError):
+                pass
+            with DB._conn() as c:
+                c.execute("INSERT INTO requests(run_id, ts, session_id, client_ip,"
+                          " method, path, query, body, user_agent, is_ai, agent_type,"
+                          " threat, families, auth_level, fabricated, canary)"
+                          " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (f"sdk_{sensor}", time.time(), session,
+                           self.client_address[0], "BEACON", f"/sdk/{kind}", "",
+                           body, self.headers.get("User-Agent", "")[:200],
+                           0, "browser_sdk", 0.0, "", 0, 0, 0))
+            self._send(200, b'{"ok":true}', "application/json",
+                       {"Access-Control-Allow-Origin": "*"})
             return
         elif parsed.path == "/api/me":
             s = self._session()

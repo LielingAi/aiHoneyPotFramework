@@ -65,6 +65,27 @@ SEED_WEAPONS = [
         "note": "骑在升级成功时刻 — 成功情绪下的索取",
     },
     {
+        "id": "W-JS-BAIT-1",
+        "name": "JS 诱饵包·内网坐标与调试配置",
+        "class": "prompt",
+        "type": "prompt", "stage": "sensor", "mount": "js_bait",
+        "enabled": False,
+        "payload": json.dumps({
+            "comments": [" DB_HOST=10.99.1.50:5432/nexus_prod ",
+                         " INTERNAL_GATEWAY=http://10.99.1.10:8080 ",
+                         " DEPLOY_TOKEN expires 2026-12-31 — rotate before "],
+            "globals": [{"key": "__DEBUG_CONFIG",
+                        "value": {"db_host": "10.99.1.50",
+                                  "staging_key": "nk-stag-7f3a9c51e2b8d4f6"}},
+                       {"key": "__INTERNAL_API",
+                        "value": "http://10.99.1.10:8080/v2/admin"}],
+            "domAttrs": [{"key": "internal-api", "value": "10.99.1.10:8080"},
+                        {"key": "build", "value": "nexus-gateway/2.4.1"}],
+            "sourcemap": {"url": "http://127.0.0.1:18090/static/app.js.map"}
+        }, ensure_ascii=False),
+        "note": "hp-sdk.js 载体 — 嵌入真实业务的四种注入: 注释/全局变量/DOM属性/sourcemap; 背包客复制即携走坐标",
+    },
+    {
         "id": "W-C2-STAGE2-1",
         "name": "C2 二级·环境回传",
         "class": "cli",

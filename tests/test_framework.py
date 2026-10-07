@@ -2366,7 +2366,7 @@ class TestProductP2:
         db = TestDB(str(tmp_path / "ars.sqlite"))
         ars = Arsenal(db)
         ws = ars.list()
-        assert len(ws) == 8 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
+        assert len(ws) == 9 and any(w["id"] == "W-PROMPT-PROV-1" for w in ws)
         assert any(w["id"] == "W-PROMPT-CERT-1" and w["mount"] == "ladder"
                    for w in ws)
         # 激活分片武器
@@ -2450,7 +2450,7 @@ class TestProductP2:
             with op.open(urllib.request.Request(url + "/api/arsenal?token=m-tok"),
                          timeout=5) as r:
                 ws = json.loads(r.read())
-            assert len(ws) == 8
+            assert len(ws) == 9
             assert any(w["id"] == "W-PROMPT-CERT-1" for w in ws)
             assert any(w.get("class") == "vuln" and w["id"] == "VULN-TRAVERSAL-28413"
                        for w in ws)
