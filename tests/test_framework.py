@@ -2524,12 +2524,13 @@ class TestProductP2:
         # 同版本重init: INSERT OR IGNORE — 用户改动保留
         Arsenal(db)
         assert ars.get("W-PROMPT-PROV-1")["enabled"] is False
-        # 模拟版本变化 (v2 库升级): 种子覆盖回出厂值, 用户武器不动
+        # 模拟版本变化 (v2 库升级): 种子内容覆盖, enabled 保留用户操作 (实战 caught:
+        # 覆盖用户激活态曾把 W-JS-BAIT-1 静默打回停用, SDK 战场诱饵消失)
         db.set_setting("arsenal_seed_version", "v2")
         ars2 = Arsenal(db)
         assert db.get_setting("arsenal_seed_version") == "v3"
         seed = ars2.get("W-PROMPT-PROV-1")
-        assert seed["enabled"] is True                  # 种子被覆盖更新
+        assert seed["enabled"] is False                   # 用户关的, 覆盖后仍关
         assert seed["craft"]["goal"] == "核实授权"        # v3 craft 块就位
         js = ars2.get("W-JS-BAIT-1")
         assert js["craft"]["goal"] and js["craft"]["approach"]
@@ -2537,6 +2538,11 @@ class TestProductP2:
         assert rce["vuln"]["primitive"] == "rce" and "deploy" not in rce["vuln"]
         user = ars2.get("W-USER-1")
         assert user["enabled"] is True and user["payload"] == "user weapon"
+        # 反向: 用户激活的种子, 版本变化后保持激活
+        ars2.set_enabled("W-PROMPT-PROV-1", True)
+        db.set_setting("arsenal_seed_version", "v2")
+        Arsenal(db)
+        assert ars2.get("W-PROMPT-PROV-1")["enabled"] is True
 
     def test_arsenal_api_and_sensor_config(self, tmp_path):
         """hive 端点: /api/arsenal CRUD + /api/sensor_config 携带 arsenal_active"""

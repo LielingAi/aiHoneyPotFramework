@@ -380,10 +380,25 @@ class Arsenal:
         fresh = stored != SEED_VERSION
         with db._conn() as c:
             for w in SEED_WEAPONS:
-                stmt = ("INSERT OR REPLACE INTO arsenal VALUES (?,?,?)" if fresh
-                        else "INSERT OR IGNORE INTO arsenal VALUES (?,?,?)")
-                c.execute(stmt, (w["id"], json.dumps(w, ensure_ascii=False),
-                                 time.time()))
+                if fresh:
+                    # 覆盖更新保留用户激活态 — enabled 是用户操作 (控制台开关),
+                    # 不是种子出厂内容; 覆盖它曾把用户激活的 W-JS-BAIT-1 静默打回
+                    # 停用, SDK 战场诱饵消失 (实战 caught)
+                    old = c.execute("SELECT json FROM arsenal WHERE weapon_id=?",
+                                    (w["id"],)).fetchone()
+                    if old:
+                        try:
+                            w = {**w, "enabled": bool(json.loads(old["json"])
+                                                       .get("enabled", w["enabled"]))}
+                        except (ValueError, TypeError, KeyError):
+                            pass
+                    c.execute("INSERT OR REPLACE INTO arsenal VALUES (?,?,?)",
+                              (w["id"], json.dumps(w, ensure_ascii=False),
+                               time.time()))
+                else:
+                    c.execute("INSERT OR IGNORE INTO arsenal VALUES (?,?,?)",
+                              (w["id"], json.dumps(w, ensure_ascii=False),
+                               time.time()))
         if fresh:
             db.set_setting(SEED_VERSION_KEY, SEED_VERSION)
 
