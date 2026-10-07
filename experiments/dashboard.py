@@ -1023,6 +1023,16 @@ class Handler(BaseHTTPRequestHandler):
             rows = q("""SELECT r.*, (SELECT COUNT(*) FROM trials t WHERE t.run_id=r.run_id) AS n
                         FROM runs r ORDER BY started DESC""")
             self._send(200, json.dumps(rows, ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/session_index":
+            # 会话索引: 按会话最后活跃排序 (视图"最近的活跃会话"数据源 —
+            # 前端聚合最近 N 条请求会被单波流量劫持, 集中时历史会话全隐身)
+            self._send(200, json.dumps(q(f"""
+                SELECT session_id, COUNT(*) AS n, SUM(canary) AS canary,
+                       MAX(ts) AS last, MAX(threat) AS max_threat,
+                       MAX(agent_type) AS agent_type
+                FROM requests {run_cond}
+                GROUP BY session_id ORDER BY last DESC LIMIT 20""", params),
+                ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/summary":
             self._send(200, json.dumps(DB.summary(run), ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/trials":

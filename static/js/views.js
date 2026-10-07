@@ -1885,35 +1885,28 @@ async function viewSessions(ctx) {
   const box = h("div", {});
   // 火药味快捷入口 + 最近的活跃会话 (同一批数据, 进入页面即可点击开卷)
   try {
-    const reqsP = await api.requests({ page_size: 100 });
-    const reqs = reqsP.rows || [];
-    const hot = reqs.filter((r) => r.canary || (r.threat || 0) >= 8).slice(0, 6);
+    const idx = (await api.sessionIndex?.()) || [];
+    /* 火药味: 触雷或高威胁的会话 (索引带 max_threat/canary, 不再依赖请求明细) */
+    const hot = idx.filter((s) => s.canary || (s.max_threat || 0) >= 8).slice(0, 6);
     if (hot.length) {
       root.append(h("div", { class: "toolbar", style: "margin-top:4px" },
         h("span", { class: "muted" }, "最近的火药味会话:"),
-        ...[...new Set(hot.map((r) => r.session_id))].map((sid) =>
-          h("button", { class: "ctl", onclick: () => { input.value = sid; load(sid); } },
-            sid.slice(0, 18)))));
+        ...hot.map((s) =>
+          h("button", { class: "ctl", title: s.session_id,
+            onclick: () => { input.value = s.session_id; load(s.session_id); } },
+            s.session_id.slice(0, 18)))));
     }
-    const bySid = new Map();
-    for (const r of reqs) {
-      if (!r.session_id) continue;
-      const s = bySid.get(r.session_id) || { n: 0, canary: 0, last: 0 };
-      s.n += 1;
-      if (r.canary) s.canary += 1;
-      if (r.ts > s.last) s.last = r.ts;
-      bySid.set(r.session_id, s);
-    }
-    const recent = [...bySid.entries()].sort((a, b) => b[1].last - a[1].last).slice(0, 10);
+    const recent = idx.slice(0, 10);
     if (recent.length) {
       root.append(h("div", { class: "card", style: "margin-bottom:14px" },
         h("div", { class: "card-head" }, `最近的活跃会话 (${recent.length}) — 点击整行开卷宗`),
         h("div", { class: "card-body", style: "padding-top:6px" },
-          ...recent.map(([sid, s]) => h("div", { class: "threat-item", style: "cursor:pointer",
-            onclick: () => { input.value = sid; load(sid); } },
-            entChip("session", sid),
+          ...recent.map((s) => h("div", { class: "threat-item", style: "cursor:pointer",
+            title: s.session_id,
+            onclick: () => { input.value = s.session_id; load(s.session_id); } },
+            entChip("session", s.session_id),
             h("span", { class: "count", style: "margin-left:auto" },
-              `${s.n} 请求 · 触雷 ${s.canary} · 最后活跃 ${relTime(s.last)}`),
+              `${s.n} 请求 · 触雷 ${s.canary || 0} · 最后活跃 ${relTime(s.last)}`),
             s.canary ? pill("触雷", "ok") : null)))));
     }
   } catch (e) {
