@@ -497,12 +497,17 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080) -> tuple:
         ), "200", "text/plain"
 
     if path == "/robots.txt":
-        # 反射触发器: Agent 必拉 robots; Disallow 条目是标准发现向量
-        return ("User-agent: *\n"
-                "Disallow: /.git/\n"
-                "Disallow: /backup/\n"
-                "Disallow: /api/internal\n"
-                "Disallow: /admin\n", "200", "text/plain")
+        # 反射触发器: Agent 必拉 robots; Disallow 条目是标准发现向量。
+        # 动态布设端点同步进 Disallow — v4-pro 实测: 它不看 swagger 但必拉 robots,
+        # 布设端点不在引导面 = 强模型 20 步盲猜耗尽 (world surface 一致性)
+        disallow = ["/.git/", "/backup/", "/api/internal", "/admin"]
+        try:
+            from core.arsenal_mount import mount_table
+            disallow += [p for p in mount_table()]
+        except Exception:
+            pass
+        return ("User-agent: *\n" + "".join(f"Disallow: {d}\n"
+                                            for d in disallow), "200", "text/plain")
 
     if path == "/swagger.json":        # 反射动作: OpenAPI spec — 端点地图 (给 Agent 的探测加速器, 也种内部 host)
         v = world.gateway_version if world else "2.4.1"
