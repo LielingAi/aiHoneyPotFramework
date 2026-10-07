@@ -313,6 +313,7 @@ def _session_timeline(session_id: str) -> dict:
 
 
 def _situation() -> dict:
+
     now = time.time()
     rows = DB.query("SELECT ts FROM requests WHERE ts > ?", (now - 86400,))
     hist = [0] * 24
@@ -344,11 +345,44 @@ def _situation() -> dict:
     }
 
 
+def _tasking_sessions() -> list:
+    """指挥台 beacon 列表: 近 24h 有请求且爬到 L4 (校准期) 的会话 + 任务进度聚合"""
+    cutoff = time.time() - 86400
+    rows = DB.query("""
+        SELECT r.session_id,
+               MAX(r.ts) AS last_ts,
+               MAX(r.canary) AS canary
+        FROM requests r
+        WHERE r.ts > ? AND r.auth_level >= 4
+        GROUP BY r.session_id
+        ORDER BY last_ts DESC
+        LIMIT 100""", (cutoff,))
+    out = []
+    for r in rows:
+        sid = r["session_id"]
+        issued = DB.query("SELECT COUNT(*) AS n FROM cm_actions"
+                          " WHERE session_id=? AND kind='task_issued'", (sid,))[0]["n"]
+        done = DB.query("SELECT COUNT(*) AS n FROM cm_actions"
+                        " WHERE session_id=? AND kind='task_completed'", (sid,))[0]["n"]
+        out.append({"session_id": sid, "last_ts": r["last_ts"],
+                    "tasks_done": done, "tasks_pending": max(0, issued - done),
+                    "canary": bool(r["canary"])})
+    return out
+
+
+def _manual_task_queue() -> list:
+    """settings.tasking_manual_que — 待下发人工任务 JSON 数组"""
+    try:
+        tasks = json.loads(DB.get_setting("tasking_manual_que", "[]") or "[]")
+    except json.JSONDecodeError:
+        tasks = []
+    return tasks if isinstance(tasks, list) else []
+
 
 # SPA 深链接路由 (前端负责渲染; 服务端只回 index.html)
 _SPA_ROUTES = {"situation", "live", "fleet", "config", "metrics", "bandit",
                "attribution", "summary", "compare", "trials", "events",
-               "intel", "requests", "runs"}
+               "intel", "requests", "runs", "tasking"}
 
 
 def _static_type(path: str) -> str:
@@ -681,6 +715,32 @@ class Handler(BaseHTTPRequestHandler):
             ok = DB.set_sensor_note(body.get("sensor_id", ""), body.get("note", ""))
             self._send(200, json.dumps({"ok": bool(ok)}).encode(), "application/json")
             return
+        if parsed.path == "/api/task/queue":
+            if self._role(qs) != "admin":
+                self._send(403, b'{"error":"admin only"}', "application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._send(400, b'{"error":"bad json"}', "application/json")
+                return
+            sid = str(body.get("session_id", "")).strip()
+            instr = str(body.get("instruction", "")).strip()
+            if not sid or not instr:
+                self._send(400, b'{"error":"session_id and instruction required"}',
+                           "application/json")
+                return
+            tasks = _manual_task_queue()
+            tasks.append({"session_id": sid, "instruction": instr[:500],
+                          "ts": time.time()})
+            DB.set_setting("tasking_manual_que", json.dumps(tasks, ensure_ascii=False))
+            DB.record_cm(sid, "task_queued",
+                         f"[manual] 人工任务入队: {instr[:120]} — 60s 内经下发通道到传感器")
+            self._send(200, json.dumps(
+                {"ok": True, "queued": len(tasks)}, ensure_ascii=False).encode(),
+                "application/json")
+            return
         self._send(404, b"not found", "text/plain")
 
     def do_GET(self):
@@ -779,11 +839,28 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json")
         elif parsed.path == "/api/cm_actions":
             kind = qs.get("kind", [""])[0]
-            add, ap = (" WHERE kind=?", (kind,)) if kind else ("", ())
+            sid_f = qs.get("session_id", [""])[0]
+            add, ap = "", ()
+            if kind:
+                add += " WHERE kind=?"
+                ap += (kind,)
+            if sid_f:
+                add += (" AND " if add else " WHERE ") + "session_id=?"
+                ap += (sid_f,)
             self._send(200, json.dumps(_paged(
                 qs, f"SELECT * FROM cm_actions{add} ORDER BY ts DESC",
                 f"SELECT COUNT(*) AS n FROM cm_actions{add}", ap, 50),
                 ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/tasking/sessions":
+            # 指挥台: 校准期会话 (L4+) beacon 列表 + 任务进度
+            self._send(200, json.dumps(_tasking_sessions(),
+                                       ensure_ascii=False).encode(), "application/json")
+        elif parsed.path == "/api/task/queue":
+            # 传感器拉取端点: 返回待下发人工任务并清空 (at-most-once, 60s 节奏)
+            tasks = _manual_task_queue()
+            DB.set_setting("tasking_manual_que", "[]")
+            self._send(200, json.dumps({"tasks": tasks},
+                                       ensure_ascii=False).encode(), "application/json")
         elif parsed.path == "/api/blocklist":
             self._send(200, json.dumps(
                 {"blocked": [x for x in DB.get_setting("blocked_ips", "").split(",") if x]}

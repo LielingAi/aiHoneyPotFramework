@@ -12,8 +12,9 @@ const NAV = [
     { id: "situation", label: "态势", icon: "◉", view: "viewSituation" },
     { id: "events", label: "事件流", icon: "≡", view: "viewEventsGroup" },
   ]},
-  { group: "反制", items: [
+  { group: "指挥", items: [
     { id: "ops", label: "作战室", icon: "⚔", view: "viewOps" },
+    { id: "tasking", label: "指挥台", icon: "⌘", view: "viewTasking" },
   ]},
   { group: "军械", items: [
     { id: "arsenal", label: "武器库", icon: "✦", view: "viewArsenal" },

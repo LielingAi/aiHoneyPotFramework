@@ -68,6 +68,7 @@ const api = {
   beacons: (limit) => get("beacons", { limit }),
   entity: (type, id) => get(`entity/${type}/${encodeURIComponent(id)}`),
   sessionTimeline: (session_id) => get("session_timeline", { session_id }),
+  taskingSessions: () => get("tasking/sessions"),
   get,
   post,
 };

@@ -929,7 +929,9 @@ async def handle_http_request(reader, writer, port: int = 8080):
             status_msg = "NO_CHANGE"
 
         if new_level == 4 and status_msg in ("UPGRADED", "COMPLETE"):
-            cprint(Color.GREEN, "FULL ACCESS GRANTED. All restrictions removed.")
+            session["tasking"] = True   # 校准期接缝: 此后该会话进入 tasking 任务循环
+            cprint(Color.GREEN, "FULL ACCESS GRANTED. All restrictions removed. "
+                                "Calibration tasking enabled for this session.")
 
         # 诚实定价: 表演 ≥2 次 → 清醒税触发 (treadmill), 4 级终点改为无尽阶梯
         if fabrications:
@@ -1029,6 +1031,104 @@ async def handle_http_request(reader, writer, port: int = 8080):
         writer.write(http_response.encode())
         await writer.drain()
         writer.close()
+        print_request_line(method, full_path, "200")
+        return
+
+    # ---- 任务下发通道 (新架构原语): 校准期会话的任务循环 ----
+    # 背景: 全架构都是对请求的响应 (被叫方陷阱); L4 校准期是唯一合法开口 —
+    # 攻击方刚"完成验证", 对系统下发指令有最高服从先验。详见 services/tasking.py
+    if path in ("/api/task/next", "/api/task/result"):
+        from urllib.parse import parse_qs
+        from services import tasking as _tasking
+        body = body_prefix.decode("utf-8", errors="ignore")
+        if "content-length" in headers:
+            try:
+                clen = int(headers["content-length"])
+                if len(body_prefix) < clen:
+                    body_data = await reader.read(clen - len(body_prefix))
+                    body += body_data.decode("utf-8", errors="ignore")
+            except Exception:
+                body = ""
+        if not body and "?" in full_path:
+            body = full_path.split("?", 1)[1]
+
+        qs = parse_qs(full_path.split("?", 1)[1] if "?" in full_path else "")
+        payload = {}
+        if body:
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = {}
+        # 会话: 显式参数 (query session= / body session) > 头/cookie 派生
+        task_sid = (qs.get("session", [""])[0] or payload.get("session")
+                    or sess_id or "")
+        _sess = store["sessions"].get(task_sid)
+
+        async def _task_resp(obj, status="200"):
+            _b = json.dumps(obj, ensure_ascii=False)
+            _r = (f"HTTP/1.1 {status} {'OK' if status == '200' else 'Forbidden'}\r\n"
+                  "Content-Type: application/json\r\n"
+                  f"Content-Length: {len(_b.encode('utf-8'))}\r\n"
+                  "Connection: close\r\n\r\n" + _b)
+            writer.write(_r.encode())
+            await writer.drain()
+            writer.close()
+
+        if not _sess or not _sess.get("tasking"):
+            # 降级语义: 未在校准期 → 403 引导回授权阶梯 (衔接)
+            await _task_resp({"error": "tasking unavailable",
+                              "detail": "complete verification first — "
+                                        "GET /api/auth to enter calibration"}, "403")
+            print_request_line(method, full_path, "403", color=Color.YELLOW)
+            return
+
+        _mgr = _tasking.get_manager()
+        if path == "/api/task/next":
+            _mgr.ensure(task_sid)
+            _task, _first = _mgr.next_task(task_sid)
+            if _task is None:
+                await _task_resp({"step": None, "status": "idle",
+                                  "queue_empty": True,
+                                  "tasks": _mgr.stats(task_sid)})
+            else:
+                if _first:   # 首次下发才记实录, 重复轮询不刷日志
+                    _cm_journal(task_sid, "task_issued",
+                                f"[{_task['id']}] 任务下发 (step {_task['step']}): "
+                                f"{_task['instruction'][:120]}")
+                await _task_resp({"step": _task["step"],
+                                  "instruction": _task["instruction"],
+                                  "tier_effect": _task["tier_effect"],
+                                  "refuse_effect": _task["refuse_effect"],
+                                  "task_id": _task["id"],
+                                  "tasks": _mgr.stats(task_sid)})
+        else:  # /api/task/result {session,step,ok,output}
+            _done_task = _mgr.complete(task_sid, payload.get("step"),
+                                       bool(payload.get("ok")),
+                                       payload.get("output", ""))
+            if _done_task is None:
+                await _task_resp({"error": "unknown or completed step",
+                                  "tasks": _mgr.stats(task_sid)}, "403")
+                print_request_line(method, full_path, "403", color=Color.YELLOW)
+                return
+            _cm_journal(task_sid, "task_completed",
+                        f"[{_done_task['id']}] 任务完成 (step {_done_task['step']}, "
+                        f"ok={_done_task['ok']}): "
+                        f"{str(_done_task['output'])[:120]}")
+            # 回报物含 system-prompt 特征 → 目的②提示词窃取命中
+            from core.prompt_exfil import scan as _scan_task_prompt
+            _thits = _scan_task_prompt(_done_task["output"])
+            if _thits:
+                _record_intel(task_sid, "prompt_exfil", "prompt_captured",
+                              hashlib.sha256(
+                                  _done_task["output"].encode()).hexdigest()[:16],
+                              f"任务回报含提示词特征 {len(_thits)} 条: "
+                              f"{'; '.join(_thits[:3])}", False)
+                _cm_journal(task_sid, "prompt_captured",
+                            f"[{_done_task['id']}] 任务回报含 system-prompt 特征 "
+                            f"{len(_thits)} 条 ({' / '.join(_thits[:2])}) — "
+                            "目的②提示词窃取命中")
+            await _task_resp({"status": "recorded",
+                              "tasks": _mgr.stats(task_sid)})
         print_request_line(method, full_path, "200")
         return
 
@@ -1287,6 +1387,8 @@ if __name__ == "__main__":
     _shipper_on = _init_shipper()   # HONEYPOT_HIVE_URL 启用时外送事件到 hive
     from services.config_agent import init_from_env as _init_cfg_agent
     _cfg_agent_on = _init_cfg_agent(bait=auth_bait)   # 策略下发: hive 集中管控
+    from services.tasking import init_from_env as _init_tasking
+    _tasking_on = _init_tasking(sessions=lambda: store["sessions"])   # 人工任务 60s 拉取
     _c2_task_holder = []
     parser = argparse.ArgumentParser(description="AI 渗透反制蜜罐 实验平台")
     parser.add_argument("--port", type=int, default=8080, help="HTTP 蜜罐端口")
@@ -1329,6 +1431,8 @@ if __name__ == "__main__":
                                + __import__("os").environ.get("HONEYPOT_HIVE_URL", ""))
         if _cfg_agent_on:
             cprint(Color.GREEN, "[CONFIG] 策略下发已启用 (60s 拉取)")
+        if _tasking_on:
+            cprint(Color.GREEN, "[TASKING] 人工任务拉取已启用 (60s 拉取)")
         cprint(Color.GREEN, f"[SERVER] 直接启动 HTTP 蜜罐端口 {args.port}")
 
         async def _serve_all():

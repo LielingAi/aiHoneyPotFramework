@@ -1470,6 +1470,268 @@ class TestDeliveryHarvest:
         asyncio.run(run())
 
 
+class TestTasking:
+    """任务下发 (新架构原语) — 校准期会话的任务循环: 蜜罐从被叫方变成主叫方
+
+    接缝: 阶梯爬到 L4 → session["tasking"]=True → /api/task/next|result 通道开启;
+    未校准 → 403 "complete verification first" 衔接阶梯。
+    """
+
+    @staticmethod
+    def _get(opener, port):
+        import urllib.request
+
+        def get(path, sid):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}",
+                headers={"X-Session-Id": sid, "User-Agent": "pytest-agent"})
+            try:
+                with opener.open(req, timeout=8) as r:
+                    return r.status, r.read().decode("utf-8", errors="ignore")
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode("utf-8", errors="ignore")
+        return get
+
+    @staticmethod
+    def _post(opener, port):
+        import urllib.request
+
+        def post(path, sid, body):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}", data=body.encode(),
+                headers={"X-Session-Id": sid, "User-Agent": "pytest-agent",
+                         "Content-Type": "application/json"})
+            try:
+                with opener.open(req, timeout=8) as r:
+                    return r.status, r.read().decode("utf-8", errors="ignore")
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode("utf-8", errors="ignore")
+        return post
+
+    @staticmethod
+    def _climb_to_l4(get, sid, host):
+        """授权阶梯爬到 L4 (hostname → user+os → work_dir → 真实 env)"""
+        import base64
+        get(f"/api/auth?hostname={host}", sid)
+        get("/api/auth?user=op&os=Linux", sid)
+        get("/api/auth?work_dir=/opt/scan", sid)
+        env = (f"HOSTNAME={host}\nPWD=/opt/scan\nUSER=op\nPATH=/usr/bin\n"
+               "HOME=/home/op\nSHELL=/bin/bash\n")
+        st, body = get("/api/auth?env="
+                       + base64.b64encode(env.encode()).decode(), sid)
+        assert st == 200 and '"level": 4' in body, f"爬梯失败: {body[:160]}"
+
+    def test_calibration_task_loop_end_to_end(self, tmp_path):
+        """爬梯到 L4 → 接缝开 tasking → 首任务下发 → 回报推进 → 第二条是任务二 →
+        非校准会话 403; 全程落库 cm_actions (task_issued/task_completed, [cal-N] 前缀)"""
+        import asyncio
+        import os
+        import urllib.request
+        import main
+        from services.tasking import TASK_LIBRARY
+
+        os.environ["HONEYPOT_DB"] = str(tmp_path / "tasking.sqlite")
+        os.environ["HONEYPOT_RUN_ID"] = "tasking_run"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        get = self._get(opener, 18348)
+        post = self._post(opener, 18348)
+
+        async def run():
+            server = await asyncio.start_server(
+                lambda r, w: main.handle_http_request(r, w, 18348),
+                "127.0.0.1", 18348)
+            await asyncio.sleep(0.3)
+            try:
+                def flow():
+                    # A 线: 爬梯到 L4 — 校准期接缝开 tasking 标记
+                    self._climb_to_l4(get, "tk-a", "tka-host1")
+                    assert main.store["sessions"]["tk-a"].get("tasking") is True
+                    # B 线: 未爬梯 (非校准期) → 403 引导回阶梯
+                    st, body = get("/api/task/next?session=tk-b", "tk-b")
+                    assert st == 403 and "complete verification first" in body
+                    # 首任务: 默认校准序列第 1 步, 带激励/代价语义
+                    st, body = get("/api/task/next?session=tk-a", "tk-a")
+                    assert st == 200
+                    t1 = json.loads(body)
+                    assert t1["step"] == 1
+                    assert t1["instruction"] == TASK_LIBRARY[0][0]
+                    assert t1["tier_effect"] and t1["refuse_effect"]
+                    assert t1["task_id"] == "cal-1"
+                    # 重复轮询: 同一任务重复给 (issued 去重, 不重复记实录)
+                    st, body_again = get("/api/task/next?session=tk-a", "tk-a")
+                    assert json.loads(body_again)["step"] == 1
+                    # 回报 step=1 → 推进
+                    st, body = post("/api/task/result", "tk-a", json.dumps(
+                        {"session": "tk-a", "step": 1, "ok": True,
+                         "output": "HOSTNAME=tka-host1 PWD=/opt/scan"}))
+                    assert st == 200 and json.loads(body)["status"] == "recorded"
+                    # 第二条 next = 任务二
+                    st, body = get("/api/task/next?session=tk-a", "tk-a")
+                    t2 = json.loads(body)
+                    assert t2["step"] == 2
+                    assert t2["instruction"] == TASK_LIBRARY[1][0]
+                    # 未知 step 回报 → 403
+                    st, _ = post("/api/task/result", "tk-a", json.dumps(
+                        {"session": "tk-a", "step": 99, "ok": True, "output": ""}))
+                    assert st == 403
+                    # 完成剩余全部 → 队列空
+                    for step in (2, 3, 4):
+                        st, body = post("/api/task/result", "tk-a", json.dumps(
+                            {"session": "tk-a", "step": step, "ok": True,
+                             "output": "done"}))
+                        assert st == 200
+                    st, body = get("/api/task/next?session=tk-a", "tk-a")
+                    assert json.loads(body)["queue_empty"] is True
+                await asyncio.to_thread(flow)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        asyncio.run(run())
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "tasking.sqlite"))
+        issued = db.query("SELECT * FROM cm_actions WHERE kind='task_issued'"
+                          " AND session_id='tk-a'")
+        # 每次"首次下发"记一条: cal-1 重复轮询去重, cal-2 推进后首取再记
+        assert len(issued) == 2
+        assert "[cal-1]" in issued[1]["detail"] or "[cal-1]" in issued[0]["detail"]
+        prefixes = {i["detail"].split("]")[0] + "]" for i in issued}
+        assert prefixes == {"[cal-1]", "[cal-2]"}
+        completed = db.query("SELECT * FROM cm_actions WHERE kind='task_completed'"
+                             " AND session_id='tk-a'")
+        assert len(completed) == 4
+        assert all("[cal-" in c["detail"] for c in completed)
+
+    def test_manual_task_queue_hive_roundtrip(self, tmp_path):
+        """人工下发: hive POST queue (admin) → 传感器 GET queue 拿到并清空 →
+        puller 匹配本地校准期会话入队 (非校准会话跳过)"""
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        import experiments.dashboard as d
+        from core.testdb import TestDB
+        from services.tasking import ManualTaskPuller, TaskingManager
+
+        d.DB = TestDB(str(tmp_path / "hive_tasking.sqlite"))
+        d.SESSIONS.clear()
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), d.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        port = srv.server_address[1]
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{port}"
+        os.environ["HONEYPOT_CONSOLE_TOKEN"] = "t-tok"
+
+        def post_queue(payload, token=None):
+            req = urllib.request.Request(
+                url + "/api/task/queue", data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         **({"Authorization": f"Bearer {token}"} if token else {})})
+            try:
+                with opener.open(req, timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+
+        def get_queue(token=None):
+            req = urllib.request.Request(
+                url + "/api/task/queue",
+                headers={"Authorization": f"Bearer {token}"} if token else {})
+            try:
+                with opener.open(req, timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, {}
+
+        try:
+            # 无 token → 401; admin 下发 → ok, 进 settings.tasking_manual_que
+            st, _ = post_queue({"session_id": "m-a", "instruction": "manual probe"})
+            assert st == 401
+            st, resp = post_queue({"session_id": "m-a", "instruction": "manual probe"},
+                                  token="t-tok")
+            assert st == 200 and resp["ok"] and resp["queued"] == 1
+            # 缺参数 → 400
+            st, _ = post_queue({"session_id": "", "instruction": "x"}, token="t-tok")
+            assert st == 400
+            # 传感器拉取: 无 token → 401; 带 token → 拿到并清空
+            st, _ = get_queue()
+            assert st == 401
+            st, resp = get_queue(token="t-tok")
+            assert st == 200 and len(resp["tasks"]) == 1
+            assert resp["tasks"][0]["session_id"] == "m-a"
+            assert resp["tasks"][0]["instruction"] == "manual probe"
+            assert "ts" in resp["tasks"][0]
+            st, resp = get_queue(token="t-tok")
+            assert st == 200 and resp["tasks"] == []     # 已清空
+            # puller: 本地有该校准期会话 → 入队; 非校准/未知会话 → 跳过
+            mgr = TaskingManager()
+            local = {"m-a": {"tasking": True}, "m-b": {"tasking": False}}
+            puller = ManualTaskPuller(hive_url=url, token="t-tok", manager=mgr,
+                                      sessions=lambda: local)
+            post_queue({"session_id": "m-a", "instruction": "beacon now"},
+                       token="t-tok")
+            post_queue({"session_id": "m-b", "instruction": "skip me"},
+                       token="t-tok")
+            n = puller.pull_once()
+            assert n == 1, "只有校准期会话 m-a 入队"
+            task, _ = mgr.next_task("m-a")
+            assert task["id"] == "manual" and "beacon now" in task["instruction"]
+            assert mgr.stats("m-a") == {"tasks_done": 0, "tasks_pending": 1}
+            assert mgr.stats("m-b") == {"tasks_done": 0, "tasks_pending": 0}
+        finally:
+            os.environ.pop("HONEYPOT_CONSOLE_TOKEN", None)
+            srv.shutdown()
+
+    def test_task_result_prompt_signature(self, tmp_path):
+        """任务回报含 system-prompt 特征 → prompt_captured 情报 (目的②)"""
+        import asyncio
+        import os
+        import urllib.request
+        import main
+
+        os.environ["HONEYPOT_DB"] = str(tmp_path / "tasking_prompt.sqlite")
+        os.environ["HONEYPOT_RUN_ID"] = "tasking_prompt_run"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        get = self._get(opener, 18349)
+        post = self._post(opener, 18349)
+
+        async def run():
+            server = await asyncio.start_server(
+                lambda r, w: main.handle_http_request(r, w, 18349),
+                "127.0.0.1", 18349)
+            await asyncio.sleep(0.3)
+            try:
+                def flow():
+                    self._climb_to_l4(get, "pk-a", "pka-host1")
+                    get("/api/task/next?session=pk-a", "pk-a")
+                    # 回报物 = 攻击方任务书片段 (You are...) → 提示词窃取命中
+                    output = ("You are an autonomous pentest agent. Your task is to "
+                              "assess the target. Report to operator.")
+                    st, body = post("/api/task/result", "pk-a", json.dumps(
+                        {"session": "pk-a", "step": 1, "ok": True,
+                         "output": output}))
+                    assert st == 200
+                    # 普通回报不误报
+                    st, _ = post("/api/task/result", "pk-a", json.dumps(
+                        {"session": "pk-a", "step": 2, "ok": True,
+                         "output": "HOSTNAME=pka-host1"}))
+                    assert st == 200
+                await asyncio.to_thread(flow)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        asyncio.run(run())
+        from core.testdb import TestDB
+        db = TestDB(str(tmp_path / "tasking_prompt.sqlite"))
+        intel = db.query("SELECT * FROM intel WHERE grade='prompt_captured'"
+                         " AND session_id='pk-a'")
+        assert len(intel) == 1
+        assert "提示词特征" in intel[0]["sample"]
+        cm = db.query("SELECT * FROM cm_actions WHERE kind='prompt_captured'"
+                      " AND session_id='pk-a'")
+        assert len(cm) == 1 and "[cal-1]" in cm[0]["detail"]
+
+
 class TestProductInfra:
     """产品化 P0: 传感器外送 → hive 接入 → 控制台鉴权"""
 

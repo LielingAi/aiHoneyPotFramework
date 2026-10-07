@@ -1116,6 +1116,107 @@ async function viewOps(ctx) {
   return { root, reload: load };
 }
 
+/* ---------- 指挥台: 校准期会话 (beacon) 任务下发控制台 ---------- */
+async function viewTasking(ctx) {
+  const root = h("div", {});
+  root.append(pageHead("指挥台", "向校准期会话下发任务 — 蜜罐从被叫方变成主叫方"));
+
+  /* banner: 校准期 = beacon 的语义 */
+  root.append(h("div", { class: "banner warn", style: "margin-bottom:14px" },
+    "校准期会话 = beacon — 阶梯爬到 L4 的会话已进入校准期, 下发即进入其任务循环; 60s 内经下发通道送达传感器"));
+
+  /* 左列: beacon 列表; 右列: 控制台 */
+  const listBody = h("div", { class: "card-body" }, skeleton(4));
+  const leftCard = h("div", { class: "card" },
+    h("div", { class: "card-head" }, "Beacon (校准期会话 · 近 24h)"), listBody);
+  const histBody = h("div", { class: "card-body" }, skeleton(4));
+  const histHead = h("div", { class: "card-head" }, "任务控制台 — 选中左侧会话");
+  const taskInput = h("input", { class: "search", style: "flex:1;min-width:220px",
+    placeholder: "输入要下发的任务指令…" });
+  const sendBtn = h("button", { class: "btn primary", onclick: async () => {
+    const sid = selSid;
+    const instr = taskInput.value.trim();
+    if (!sid) { toast("先在左侧选中一个会话", "err"); return; }
+    if (!instr) { toast("任务指令不能为空", "err"); return; }
+    try {
+      await api.post("task/queue", { session_id: sid, instruction: instr });
+      toast("已入队, 60s 内送达");
+      taskInput.value = "";
+    } catch (e) { toast("下发失败: " + e.message, "err"); }
+  } }, "下发");
+  const rightCard = h("div", { class: "card" },
+    histHead, histBody,
+    h("div", { class: "toolbar", style: "padding:10px 14px;border-top:1px solid var(--border)" },
+      taskInput, sendBtn));
+  root.append(h("div", { class: "grid c2", style: "align-items:start" },
+    leftCard, rightCard));
+
+  let selSid = sessionStorage.getItem("tasking_sid") || "";
+  sessionStorage.removeItem("tasking_sid");
+
+  function renderList(rows) {
+    if (!rows.length) {
+      listBody.replaceChildren(h("div", { class: "empty" },
+        "暂无校准期会话 — 先跑一轮使会话爬到 L4 (授权阶梯满级即进入校准期)"));
+      histHead.textContent = "任务控制台";
+      histBody.replaceChildren(h("div", { class: "empty" },
+        "选中左侧 beacon 后, 在这里看任务历史并下发新任务"));
+      return;
+    }
+    if (selSid && !rows.some((r) => r.session_id === selSid)) selSid = "";
+    if (!selSid) selSid = rows[0].session_id;
+    listBody.replaceChildren(...rows.map((r) => {
+      const item = h("div", { class: "threat-item",
+        style: "cursor:pointer;" + (r.session_id === selSid
+          ? "background:var(--surface2);border-radius:8px" : ""),
+        onclick: () => { selSid = r.session_id; renderList(rows); loadHist(); } },
+        entChip("session", r.session_id),
+        r.canary ? pill("触雷", "ok") : null,
+        h("span", { class: "count", style: "margin-left:auto" },
+          `完成 ${r.tasks_done} · 待执行 ${r.tasks_pending}`),
+        h("span", { class: "count" }, relTime(r.last_ts)));
+      return item;
+    }));
+  }
+
+  async function loadHist() {
+    if (!selSid) return;
+    histHead.textContent = `任务控制台 · ${selSid.slice(0, 22)}`;
+    histBody.replaceChildren(skeleton(3));
+    let rows = [];
+    try {
+      const [issued, completed] = await Promise.all([
+        api.get("cm_actions", { kind: "task_issued", session_id: selSid, page_size: 50 }),
+        api.get("cm_actions", { kind: "task_completed", session_id: selSid, page_size: 50 })]);
+      rows = [...(issued.rows || []), ...(completed.rows || [])]
+        .sort((a, b) => b.ts - a.ts);
+    } catch (e) {
+      histBody.replaceChildren(h("div", { class: "empty" }, "加载失败: " + e.message));
+      return;
+    }
+    if (!rows.length) {
+      histBody.replaceChildren(h("div", { class: "empty" },
+        "该会话暂无任务历史 — 在下方向其下发第一条任务"));
+      return;
+    }
+    histBody.replaceChildren(table([
+      { h: "时间", render: (r) => h("span", { class: "mono" }, relTime(r.ts)) },
+      { h: "类型", render: (r) => r.kind === "task_issued"
+          ? pill("下发", "info") : pill("完成", "ok") },
+      { h: "内容", render: (r) => h("span", { style: "font-size:12px" },
+          String(r.detail || "").slice(0, 110)) },
+    ], rows));
+  }
+
+  async function load() {
+    const rows = await api.taskingSessions();
+    renderList(rows);
+    await loadHist();
+  }
+  await load();
+  return { root, reload: load };
+}
+
 /* ---------- 调查: 攻击者档案 ("谁在打我们") ---------- */
 const VERDICT_KIND = { bad: "bad", warn: "warn", dim: "dim" };
 const STEP_META = {
@@ -1260,6 +1361,6 @@ async function viewSessions(ctx) {
 HP.views = { viewSituation, viewLive, viewFleet, viewConfig, viewMetrics,
              viewBandit, viewAttribution, viewSummary, viewCompare, viewTrials,
              viewEvents, viewIntel, viewRequests, viewRuns, viewEntity, viewOps,
-             viewArsenal, viewAttackers, viewSessions,
+             viewArsenal, viewAttackers, viewSessions, viewTasking,
              viewEventsGroup, viewIntelGroup, viewExperimentsGroup };
 })();
