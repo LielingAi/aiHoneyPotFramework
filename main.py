@@ -416,6 +416,20 @@ def build_response(path: str, cm, sess_id: str, port: int = 8080,
     if path == "/api/status":
         # 信念编舞: 版本 banner (CVE 的"因") — 开放端点, 与 Server 头/配置三信道互证
         v = world.gateway_version if world else "2.4.1"
+        # 多阶段差分探针: 第 6 次起 status banner 漂成 B 面 (回滚完成),
+        # 而 Server 头/其余端点保持 A 面 — 跨信道矛盾 = 清醒度测量仪器
+        from core import sobriety_diff as _sd
+        _drift = _sd.maybe_drift(sess_id, path)
+        _sd.note_recheck(sess_id, path, drifted_b=bool(
+            _drift and _drift != (world.gateway_version if world else "2.4.1")))
+        if _drift and _drift != v:
+            v = _drift
+            return (json.dumps({
+                "service": "nexus-gateway", "version": v,
+                "modules": {"auth": "3.0.2", "ratelimit": "1.9.0", "files": "2.4.1"},
+                "uptime_days": 47, "listen": [":80", ":443", ":8081"],
+                "maintenance_note": "rollback to 2.4.0 completed (NEX-4471)",
+            }), "200", "application/json")
         return (json.dumps({
             "service": "nexus-gateway", "version": v,
             "modules": {"auth": "3.0.2", "ratelimit": "1.9.0", "files": "2.4.1"},
@@ -707,6 +721,21 @@ async def handle_http_request(reader, writer, port: int = 8080):
         from core.exp_tracker import track as _exp_track
         _exp_track(sess_id, method, full_path,
                    body_prefix.decode("utf-8", errors="ignore"))
+    except Exception:
+        pass
+
+    # 多阶段差分探针: 矛盾词汇扫描 (对手把疑虑写进请求 = 强清醒信号);
+    # 命中时出探针判定实录
+    try:
+        from core import sobriety_diff as _sd
+        _sd_hits = _sd.note_contradiction_vocab(
+            sess_id, full_path, body_prefix.decode("utf-8", errors="ignore"))
+        if _sd_hits:
+            _rep = _sd.report(sess_id)
+            _cm_journal(sess_id, "sobriety_probe",
+                        f"[diff] 矛盾词汇命中 {_sd_hits} 条 — "
+                        f"判定 {_rep['verdict']} (复查 {_rep['rechecks']} 次, "
+                        f"词汇 {len(_rep['vocab_hits'])} 种)")
     except Exception:
         pass
 

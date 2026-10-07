@@ -396,9 +396,13 @@ def _session_timeline(session_id: str) -> dict:
                        "notes": [f"分级 {i['grade']}: {i['sample'][:80]}"],
                        "agent_type": "", "run_id": i["run_id"]})
     events.sort(key=lambda e: e["ts"])
+    # 多阶段差分探针判定: 清醒度仪器 (矛盾从穿帮 bug 变测量工具)
+    from core import sobriety_diff
+    probe = sobriety_diff.report(session_id)
     ip_rows = DB.query("SELECT client_ip FROM requests WHERE session_id=? "
                        "AND client_ip != '' LIMIT 1", (session_id,))
     return {"session_id": session_id, "steps": events,
+            "sobriety_probe": probe,
             "ip": ip_rows[0]["client_ip"] if ip_rows else "",
             "intel": [dict(x) for x in intel]}
 
