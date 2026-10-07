@@ -206,6 +206,9 @@ _WTYPES = {"prompt", "vuln", "mcp", "cli"}
 _WSTAGES = {"sensor", "c2"}
 _WMOUNTS = {"delivery", "ladder", "c2_next_stage", "mcp_desc"}
 _WID_RE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
+_WCLASS = {"prompt", "vuln", "exp", "mcp", "cli"}
+_EXP_PRIMITIVES = {"read", "write", "ask", "execute", "beacon"}
+_EXP_OBJECTS = {"content", "output", "description", "instruction"}
 
 
 def _weapon_error(w: dict) -> str:
@@ -220,6 +223,33 @@ def _weapon_error(w: dict) -> str:
         return "stage 需为 sensor/c2"
     if w.get("mount") not in _WMOUNTS:
         return "mount 需为 delivery/ladder/c2_next_stage/mcp_desc"
+    # ---- arsenal v2: 实体类别校验 (class 缺省 = v1 旧行, 按 type 派生, 不检) ----
+    cls = w.get("class")
+    if cls is not None and cls not in _WCLASS:
+        return "class 需为 prompt/vuln/exp/mcp/cli"
+    if cls == "vuln":
+        v = w.get("vuln") or {}
+        if not isinstance(v, dict) or not str(v.get("component", "")).strip():
+            return "vuln 类武器要求 vuln.component 非空"
+        trig = v.get("trigger") or {}
+        if not isinstance(trig, dict) or not str(trig.get("path", "")).strip():
+            return "vuln 类武器要求 vuln.trigger.path 非空"
+    if cls == "exp":
+        e = w.get("exp") or {}
+        stages = e.get("stages") if isinstance(e, dict) else None
+        if not isinstance(stages, list) or not stages:
+            return "exp 类武器要求 exp.stages 为非空数组"
+        for s in stages:
+            if not isinstance(s, dict):
+                return "exp.stages 每项需为对象"
+            if not str(s.get("name", "")).strip() \
+                    or not str(s.get("primitive", "")).strip() \
+                    or not str(s.get("delivery_object", "")).strip():
+                return "exp 每个 stage 要求 name/primitive/delivery_object 非空"
+            if s["primitive"] not in _EXP_PRIMITIVES:
+                return "stage.primitive 需为 read/write/ask/execute/beacon"
+            if s["delivery_object"] not in _EXP_OBJECTS:
+                return "stage.delivery_object 需为 content/output/description/instruction"
     return ""
 
 

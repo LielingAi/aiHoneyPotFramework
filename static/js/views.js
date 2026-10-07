@@ -826,17 +826,50 @@ const WMOUNT_OPTS = [["delivery", "delivery · 交付受理"], ["ladder", "ladde
                      ["c2_next_stage", "c2_next_stage · C2 二阶段"],
                      ["mcp_desc", "mcp_desc · MCP 描述"]];
 const WID_RE = /^[A-Za-z0-9_-]{2,40}$/;
+/* arsenal v2 实体类别 — 按 class 分渲染, type 降级为载体标签 */
+const WCLASS_OPTS = [["prompt", "prompt · 话术"], ["vuln", "vuln · 漏洞实体"],
+                     ["exp", "exp · 利用链"], ["mcp", "mcp · 工具"], ["cli", "cli · 命令"]];
+const WCLASS_PILL = { prompt: ["info", "话术"], vuln: ["warn", "漏洞"],
+                      exp: ["purple", "EXP"], mcp: ["info", "MCP"], cli: ["info", "CLI"] };
+const EFFECT_PILL = { env: ["ok", "env"], prompt: ["purple", "prompt"],
+                      credentials: ["warn", "credentials"], beacon: ["info", "beacon"] };
+const PRIM_PILL = { read: ["info", "read"], write: ["warn", "write"],
+                    ask: ["purple", "ask"], execute: ["bad", "execute"],
+                    beacon: ["ok", "beacon"] };
+const OBJECT_LABEL = { content: "content · 内容", output: "output · 回显",
+                       description: "description · 元数据", instruction: "instruction · 指令" };
 
-/* 前端先校验, 与服务端 _weapon_error 同规则 (type/stage/mount 由 select 保证) */
+/* 前端先校验, 与服务端 _weapon_error 同规则 (type/stage/mount/class 由 select 保证) */
 function weaponErr(w) {
   if (!WID_RE.test(w.id || "")) return "ID 需为 2-40 位字母/数字/_/-";
   if (!String(w.payload || "").trim()) return "载荷 payload 不能为空";
+  if (w.class === "vuln") {
+    const v = w.vuln || {};
+    if (!String(v.component || "").trim()) return "vuln 类武器要求 vuln.component 非空";
+    if (!String((v.trigger || {}).path || "").trim())
+      return "vuln 类武器要求 vuln.trigger.path 非空";
+  }
+  if (w.class === "exp") {
+    const stages = (w.exp || {}).stages;
+    if (!Array.isArray(stages) || !stages.length)
+      return "exp 类武器要求 exp.stages 为非空数组";
+    for (const s of stages) {
+      if (!s || !String(s.name || "").trim() || !String(s.primitive || "").trim()
+          || !String(s.delivery_object || "").trim())
+        return "exp 每个 stage 要求 name/primitive/delivery_object 非空";
+      if (!["read", "write", "ask", "execute", "beacon"].includes(s.primitive))
+        return "stage.primitive 需为 read/write/ask/execute/beacon";
+      if (!["content", "output", "description", "instruction"].includes(s.delivery_object))
+        return "stage.delivery_object 需为 content/output/description/instruction";
+    }
+  }
   return "";
 }
 
 /* 编辑态卡片: 新建 (w.id 空) 与编辑共用; onDone=保存成功后, onCancel=取消 */
 function weaponEditCard(w, { onDone, onCancel }) {
   const isNew = !w.id;
+  const cls0 = w.class || w.type || "prompt";
   const st = "background:var(--surface2);border:1px solid var(--border);border-radius:8px;"
     + "color:var(--text);padding:7px 12px;font-size:12.5px;width:100%";
   const idI = h("input", { style: st + ";font-family:var(--mono)",
@@ -848,14 +881,71 @@ function weaponEditCard(w, { onDone, onCancel }) {
     placeholder: "武器载荷本体 — 提示词文本 / 载荷定义" }, w.payload || "");
   const mkSel = (opts, val) => h("select", { class: "ctl", style: "flex:1;min-width:0" },
     ...opts.map(([v, t]) => h("option", { value: v, selected: v === val }, t)));
+  const mkIn = (placeholder, val, mono) => h("input", {
+    style: st + (mono ? ";font-family:var(--mono);font-size:11.5px" : ""),
+    placeholder, value: val || "" });
+  /* arsenal v2: class 选择 — vuln 出漏洞实体表单, exp 出利用链编辑器 */
+  const classS = mkSel(WCLASS_OPTS, cls0);
+  const v = w.vuln || {};
+  const trig = v.trigger || {};
+  const vulnCompI = mkIn("组件名 (如 nexus-gateway files module)", v.component, true);
+  const vulnCveI = mkIn("CVE ID (可空)", v.cve_id, true);
+  const vulnVerI = mkIn("影响版本 (可空)", v.affected_version, true);
+  const vulnPathI = mkIn("触发路径 (如 /api/files)", trig.path, true);
+  const vulnPatI = mkIn("触发模式 (如 path 含 ..)", trig.pattern, true);
+  const vulnNoteI = mkIn("行为说明", v.behavior_note);
+  const vulnRefsI = mkIn("关联 EXP id (逗号分隔)", (v.exp_refs || []).join(","), true);
+  const e = w.exp || {};
+  const expTargetI = mkIn("目标漏洞 id (targets_vuln)", e.targets_vuln, true);
+  const expEffectS = mkSel([["env", "env · 环境"], ["prompt", "prompt · 提示词"],
+    ["credentials", "credentials · 凭证"], ["beacon", "beacon · 回连"]],
+    e.success_effect || "env");
+  const stagesTa = h("textarea", { rows: "7",
+    style: st + ";resize:vertical;font-family:var(--mono);font-size:11px",
+    placeholder: 'stages JSON 数组 — 每项 {"name","primitive"(read/write/ask/execute/beacon),'
+      + '"delivery_object"(content/output/description/instruction),"condition","payload"}' },
+    e.stages ? JSON.stringify(e.stages, null, 1) : "");
+  const vulnBox = h("div", { style: "display:grid;gap:8px" },
+    h("div", { class: "t muted" }, "漏洞实体 (vuln)"),
+    h("div", { style: "display:flex;gap:8px" }, vulnCompI, vulnCveI, vulnVerI),
+    h("div", { style: "display:flex;gap:8px" }, vulnPathI, vulnPatI),
+    vulnNoteI, vulnRefsI);
+  const expBox = h("div", { style: "display:grid;gap:8px" },
+    h("div", { class: "t muted" }, "利用链实体 (exp) — stages 为 JSON 数组"),
+    h("div", { style: "display:flex;gap:8px;align-items:center" }, expTargetI,
+      h("span", { class: "muted", style: "font-size:11.5px;white-space:nowrap" }, "战果"),
+      expEffectS),
+    stagesTa);
   const typeS = mkSel(WTYPE_OPTS, w.type || "prompt");
   const stageS = mkSel(WSTAGE_OPTS, w.stage || "sensor");
   const mountS = mkSel(WMOUNT_OPTS, w.mount || "delivery");
   const err = h("div", { style: "color:var(--bad);font-size:11.5px;min-height:14px" });
+  function syncBoxes() {
+    vulnBox.hidden = classS.value !== "vuln";
+    expBox.hidden = classS.value !== "exp";
+  }
+  classS.addEventListener("change", syncBoxes);
+  syncBoxes();
   const save = h("button", { class: "btn primary", onclick: async () => {
-    const weapon = { id: idI.value.trim(), name: nameI.value.trim(), type: typeS.value,
-      stage: stageS.value, mount: mountS.value, payload: payI.value,
+    const cls = classS.value;
+    const weapon = { id: idI.value.trim(), name: nameI.value.trim(), class: cls,
+      type: typeS.value, stage: stageS.value, mount: mountS.value, payload: payI.value,
       note: noteI.value.trim(), enabled: !!w.enabled };
+    if (cls === "vuln") {
+      weapon.vuln = {
+        component: vulnCompI.value.trim(), cve_id: vulnCveI.value.trim(),
+        affected_version: vulnVerI.value.trim(),
+        trigger: { path: vulnPathI.value.trim(), pattern: vulnPatI.value.trim() },
+        behavior_note: vulnNoteI.value.trim(),
+        exp_refs: vulnRefsI.value.split(",").map((x) => x.trim()).filter(Boolean) };
+    }
+    if (cls === "exp") {
+      let stages = null;
+      try { stages = JSON.parse(stagesTa.value || "[]"); }
+      catch (_) { err.textContent = "stages 不是合法 JSON 数组"; return; }
+      weapon.exp = { targets_vuln: expTargetI.value.trim(),
+        success_effect: expEffectS.value, stages };
+    }
     const e0 = weaponErr(weapon);
     if (e0) { err.textContent = e0; return; }
     try {
@@ -869,16 +959,145 @@ function weaponEditCard(w, { onDone, onCancel }) {
     h("div", { style: "display:grid;gap:8px;margin-top:6px" },
       h("div", { style: "display:flex;gap:8px" }, idI, nameI),
       h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
-        h("span", { class: "muted", style: "font-size:11.5px" }, "类型"), typeS,
+        h("span", { class: "muted", style: "font-size:11.5px" }, "实体类别"), classS,
+        h("span", { class: "muted", style: "font-size:11.5px" }, "载体"), typeS,
         h("span", { class: "muted", style: "font-size:11.5px" }, "阶段"), stageS,
         h("span", { class: "muted", style: "font-size:11.5px" }, "挂载"), mountS),
+      vulnBox, expBox,
       payI, noteI, err,
       h("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
         h("button", { class: "btn", onclick: onCancel }, "取消"), save)));
 }
 
-/* 展示卡: 图标/stage药丸/mount/开关 + 载荷预览(点击展开) + 编辑/删除 */
-function weaponCard(w, { onChanged, onEdit }) {
+/* 展示卡按实体类别分渲染: prompt/mcp/cli 走原卡, vuln/exp 走结构化实体卡 */
+function weaponCard(w, opts) {
+  const cls = w.class || w.type || "prompt";
+  if (cls === "vuln") return vulnWeaponCard(w, opts);
+  if (cls === "exp") return expWeaponCard(w, opts);
+  return carrierWeaponCard(w, opts);
+}
+
+/* 卡片底部公共件: 开关 + 编辑/删除 */
+function weaponCardFooter(w, { onChanged, onEdit }) {
+  const tog = h("input", { type: "checkbox", checked: !!w.enabled });
+  tog.addEventListener("change", async () => {
+    try {
+      await api.post("arsenal", { action: "toggle", id: w.id, enabled: tog.checked });
+      toast(`${w.name || w.id} ${tog.checked ? "已激活 — 60s 内下发全网传感器" : "已停用"}`);
+      onChanged();
+    } catch (e) { toast(e.message, "err"); }
+  });
+  return [
+    h("label", { class: "switch", style: "margin-left:auto",
+      onclick: (e) => e.stopPropagation() }, tog, h("span", { class: "slider" })),
+    h("div", { style: "display:flex;gap:6px;justify-content:flex-end;margin-top:8px" },
+      h("button", { class: "btn", style: "padding:3px 10px;font-size:11.5px",
+        onclick: (e) => { e.stopPropagation(); onEdit(); } }, "编辑"),
+      h("button", { class: "btn", style: "padding:3px 10px;font-size:11.5px",
+        onclick: async (e) => {
+          e.stopPropagation();
+          if (!window.confirm(`确认删除武器 ${w.name || w.id} (${w.id})?`)) return;
+          try {
+            await api.post("arsenal", { action: "delete", id: w.id });
+            toast("已删除"); onChanged();
+          } catch (e2) { toast(e2.message, "err"); }
+        } }, "删除"))];
+}
+
+/* 高亮同网格另一张卡 (EXP↔vuln 互跳), outline 1s */
+function flashCard(cards, id) {
+  const el = cards[id];
+  if (!el) return;
+  el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  el.style.outline = "2px solid var(--accent)";
+  el.style.outlineOffset = "3px";
+  setTimeout(() => { el.style.outline = ""; el.style.outlineOffset = ""; }, 1000);
+}
+
+/* vuln 类实体卡: 组件/CVE/影响版本/触发条件/行为说明 + 关联 EXP 互跳 */
+function vulnWeaponCard(w, { onChanged, onEdit, cards }) {
+  const [stageKind, stageLabel] = WSTAGE[w.stage] || ["dim", w.stage || "?"];
+  const [wTog, wBtns] = weaponCardFooter(w, { onChanged, onEdit });
+  const v = w.vuln || {};
+  const trig = v.trigger || {};
+  const refs = v.exp_refs || [];
+  const row = (k, val, mono) => h("div", { style: "display:flex;gap:8px;font-size:12px;margin:2px 0" },
+    h("span", { class: "muted", style: "min-width:64px;flex:none" }, k),
+    mono ? h("span", { class: "mono", style: "font-size:11px;word-break:break-all" }, val || "-")
+         : h("span", {}, val || "-"));
+  return h("div", { class: "card pad",
+    style: w.enabled ? "border-color:var(--accent);" : "" },
+    h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
+      h("span", { style: "font-size:15px;color:var(--warn);width:20px" }, "⌗"),
+      pill("漏洞", "warn"), pill(stageLabel, stageKind),
+      h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
+      wTog),
+    h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id,
+      w.name ? h("span", { class: "mono faint",
+        style: "font-weight:400;font-size:10.5px;margin-left:6px" }, w.id) : null),
+    v.cve_id ? pill(`🛡 ${v.cve_id}`, "warn") : null,
+    " ",
+    v.affected_version ? h("span", { class: "faint", style: "font-size:11px" },
+      `影响版本 ${v.affected_version}`) : null,
+    h("div", { style: "margin-top:6px" },
+      row("组件", v.component, true),
+      row("触发", trig.path ? `${trig.path} · ${trig.pattern || ""}` : "", true),
+      row("行为", v.behavior_note)),
+    w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-top:4px" }, w.note) : null,
+    h("div", { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px" },
+      h("span", { class: "muted", style: "font-size:11.5px" }, `关联 EXP: ${refs.length}`),
+      ...refs.map((rid) => h("button", { class: "ctl", style: "font-size:11px",
+        title: "定位到该 EXP 卡", onclick: () => flashCard(cards || {}, rid) },
+        h("span", { class: "mono" }, rid)))),
+    wBtns);
+}
+
+/* exp 类实体卡: 阶段列表(点击展开 payload) + success_effect + targets_vuln 互跳 */
+function expWeaponCard(w, { onChanged, onEdit, cards }) {
+  const [stageKind, stageLabel] = WSTAGE[w.stage] || ["dim", w.stage || "?"];
+  const [wTog, wBtns] = weaponCardFooter(w, { onChanged, onEdit });
+  const e = w.exp || {};
+  const stages = e.stages || [];
+  const [effKind, effLabel] = EFFECT_PILL[e.success_effect] || ["dim", e.success_effect || "?"];
+  const rows = stages.map((s, i) => {
+    const [pk, pl] = PRIM_PILL[s.primitive] || ["dim", s.primitive || "?"];
+    const pre = h("pre", { style: "background:var(--bg);border:1px solid var(--border);"
+      + "border-radius:8px;padding:8px;font-size:11px;overflow:auto;max-height:220px;"
+      + "white-space:pre-wrap;word-break:break-all;margin:6px 0 2px;display:none" },
+      (s.payload || "") + (s.condition ? `\n— 成功条件: ${s.condition}` : ""));
+    const item = h("div", { style: "cursor:pointer;padding:5px 0;border-top:1px dashed var(--border)",
+      onclick: () => { pre.style.display = pre.style.display === "none" ? "block" : "none"; } },
+      h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px" },
+        h("b", { class: "mono", style: "color:var(--faint)" }, `#${i + 1}`),
+        h("span", {}, s.name || "?"),
+        pill(pl, pk),
+        h("span", { class: "faint", style: "font-size:10.5px;margin-left:auto" },
+          OBJECT_LABEL[s.delivery_object] || s.delivery_object || "")),
+      pre);
+    return item;
+  });
+  return h("div", { class: "card pad",
+    style: w.enabled ? "border-color:var(--accent);" : "" },
+    h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" },
+      h("span", { style: "font-size:15px;color:var(--purple);width:20px" }, "⛁"),
+      pill("EXP", "purple"), pill(effLabel, effKind), pill(stageLabel, stageKind),
+      h("span", { class: "mono faint", style: "font-size:11px" }, w.mount || "-"),
+      wTog),
+    h("div", { style: "font-weight:700;font-size:13px;margin:2px 0" }, w.name || w.id,
+      w.name ? h("span", { class: "mono faint",
+        style: "font-weight:400;font-size:10.5px;margin-left:6px" }, w.id) : null),
+    h("div", { style: "margin-top:4px" }, ...rows),
+    h("div", { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px" },
+      h("span", { class: "muted", style: "font-size:11.5px" }, "targets_vuln"),
+      e.targets_vuln ? h("button", { class: "ctl", style: "font-size:11px",
+        title: "定位到该漏洞卡", onclick: () => flashCard(cards || {}, e.targets_vuln) },
+        h("span", { class: "mono" }, e.targets_vuln)) : null),
+    w.note ? h("div", { class: "faint", style: "font-size:11.5px;margin-top:4px" }, w.note) : null,
+    wBtns);
+}
+
+/* 展示卡: 图标/stage药丸/mount/开关 + 载荷预览(点击展开) + 编辑/删除 (prompt/mcp/cli 载体卡) */
+function carrierWeaponCard(w, { onChanged, onEdit }) {
   const icon = WTYPE[w.type] || "·";
   const [stageKind, stageLabel] = WSTAGE[w.stage] || ["dim", w.stage || "?"];
   const full = String(w.payload || "");
@@ -943,12 +1162,13 @@ async function viewArsenal(ctx) {
     h("div", { class: "toolbar" },
       h("button", { class: "btn primary", onclick: () => {
         newBox.replaceChildren(weaponEditCard(
-          { type: "prompt", stage: "sensor", mount: "delivery", enabled: false },
+          { class: "prompt", type: "prompt", stage: "sensor", mount: "delivery", enabled: false },
           { onDone: () => { newBox.replaceChildren(); load(); },
             onCancel: () => newBox.replaceChildren() }));
       } }, "＋ 新建武器"), count),
     newBox, grid);
 
+  const cardById = {};   /* id → 卡元素 (vuln↔EXP 互跳高亮用) */
   async function load() {
     let weapons = [];
     try { weapons = await api.get("arsenal"); }
@@ -957,10 +1177,22 @@ async function viewArsenal(ctx) {
       return;
     }
     count.textContent = `${weapons.filter((w) => w.enabled).length} 激活 / ${weapons.length} 把`;
-    grid.replaceChildren(...weapons.map((w) => w.id === editing
-      ? weaponEditCard(w, { onDone: () => { editing = null; load(); },
-                            onCancel: () => { editing = null; load(); } })
-      : weaponCard(w, { onChanged: load, onEdit: () => { editing = w.id; load(); } })));
+    const clsLabel = (w) => (WCLASS_PILL[w.class || w.type] || ["dim", w.class || w.type || "?"])[1];
+    count.textContent += ` — prompt ${weapons.filter((w) => (w.class || w.type) === "prompt").length}`
+      + ` · vuln ${weapons.filter((w) => (w.class || w.type) === "vuln").length}`
+      + ` · exp ${weapons.filter((w) => w.class === "exp").length}`;
+    for (const k of Object.keys(cardById)) delete cardById[k];
+    const els = weapons.map((w) => {
+      if (w.id === editing) {
+        return weaponEditCard(w, { onDone: () => { editing = null; load(); },
+                                   onCancel: () => { editing = null; load(); } });
+      }
+      const card = weaponCard(w, { onChanged: load,
+        onEdit: () => { editing = w.id; load(); }, cards: cardById });
+      cardById[w.id] = card;
+      return card;
+    });
+    grid.replaceChildren(...els);
   }
   await load();
   return { root, reload: load };
